@@ -2,8 +2,6 @@ import numpy.typing as npt
 
 import numpy as np
 
-from .base import BaseSizeSelector
-
 
 def _otsu_cut(scores_desc: npt.NDArray, min_k: int = 1) -> int:
     """
@@ -31,13 +29,22 @@ def _otsu_cut(scores_desc: npt.NDArray, min_k: int = 1) -> int:
     return max(k, min_k)
 
 
-class SpectralSeededSelector(BaseSizeSelector):
+class SpectralSeededSelector:
     """Two-stage seeded spectral size selector (Phase 4 of the "Adversary
     Size Estimation Investigation").
 
-    See `BaseSizeSelector` for the shared contract. Unlike `DensitySelector`,
-    this method looks past `worker_scores`/`task_scores` at `biadj_mat`
-    itself: it pools candidate workers/tasks by rank (top
+    A size selector estimates the number of adversarial workers and
+    targeted tasks from adversary scores, independently of how those
+    scores were produced. It is deliberately decoupled from
+    `subcad.detection`'s detectors: `select` takes a bipartite graph and a
+    pair of pre-ranked score arrays (ascending suspicion, i.e. the same
+    convention as a detector's `worker_scores_`/`task_scores_`) and returns
+    a size estimate for each side, so any detector's scores -- or an
+    ensembled combination of several -- can be paired with this selector.
+
+    Unlike `DensitySelector`, this method looks past
+    `worker_scores`/`task_scores` at `biadj_mat` itself: it pools
+    candidate workers/tasks by rank (top
     `worker_pool_frac`/`task_pool_frac` fraction each), takes the top left
     singular vector of the pooled biadjacency submatrix and cuts it via
     Otsu's method for a worker-side estimate, then uses that worker
@@ -86,6 +93,30 @@ class SpectralSeededSelector(BaseSizeSelector):
         worker_scores: npt.NDArray,
         task_scores: npt.NDArray,
     ) -> tuple[int, int]:
+        """Estimate the number of adversarial workers and targeted tasks.
+
+        Parameters
+        ----------
+        biadj_mat
+            $(M, N)$ dimensional bi-adjacency matrix of the worker-task
+            bipartite graph that `worker_scores`/`task_scores` were derived
+            from, e.g. a fitted detector's `biadj_mat_` attribute.
+        worker_scores
+            $(M, )$ dimensional array of per-worker adversary scores,
+            higher indicating higher likelihood of being adversarial, e.g.
+            a fitted detector's `worker_scores_` attribute.
+        task_scores
+            $(N, )$ dimensional array of per-task adversary scores, higher
+            indicating higher likelihood of being targeted, e.g. a fitted
+            detector's `task_scores_` attribute.
+
+        Returns
+        -------
+        n_adversaries : int
+            Estimated number of adversarial workers.
+        n_targets : int
+            Estimated number of targeted tasks.
+        """
         n_workers, n_tasks = biadj_mat.shape
         worker_pool_size = max(4, int(self.worker_pool_frac * n_workers))
         task_pool_size = max(4, int(self.task_pool_frac * n_tasks))

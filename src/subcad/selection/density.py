@@ -2,21 +2,28 @@ import numpy.typing as npt
 
 import numpy as np
 
-from .base import BaseSizeSelector
 
-
-class DensitySelector(BaseSizeSelector):
+class DensitySelector:
     """Size selector based on the densest point along a peeling trajectory.
 
-    See `BaseSizeSelector` for the shared contract. This is the "vanilla"
-    approach originally used by `GreedyDetector`/`GreedyPPDetector`
-    (Fraudar-style): treat `worker_scores`/`task_scores` as a peeling
-    order (ascending suspicion, ties broken by index), replay removing
-    nodes in that order one at a time -- always peeling whichever side's
-    next candidate currently has the smaller remaining (weighted) degree,
-    same tie-breaking as the original peeling loop -- and track the size
-    of the remaining worker/task sets at the point of maximum density
-    (total remaining edge weight / number of remaining nodes).
+    A size selector estimates the number of adversarial workers and
+    targeted tasks from adversary scores, independently of how those
+    scores were produced. It is deliberately decoupled from
+    `subcad.detection`'s detectors: `select` takes a bipartite graph and a
+    pair of pre-ranked score arrays (ascending suspicion, i.e. the same
+    convention as a detector's `worker_scores_`/`task_scores_`) and returns
+    a size estimate for each side, so any detector's scores -- or an
+    ensembled combination of several -- can be paired with this selector.
+
+    This is the "vanilla" approach originally used by
+    `GreedyDetector`/`GreedyPPDetector` (Fraudar-style): treat
+    `worker_scores`/`task_scores` as a peeling order (ascending suspicion,
+    ties broken by index), replay removing nodes in that order one at a
+    time -- always peeling whichever side's next candidate currently has
+    the smaller remaining (weighted) degree, same tie-breaking as the
+    original peeling loop -- and track the size of the remaining
+    worker/task sets at the point of maximum density (total remaining
+    edge weight / number of remaining nodes).
 
     Since it only needs a fixed order to replay (not to discover), it
     requires no search structure (unlike the `MinTree`-based discovery in
@@ -42,6 +49,30 @@ class DensitySelector(BaseSizeSelector):
         worker_scores: npt.NDArray,
         task_scores: npt.NDArray,
     ) -> tuple[int, int]:
+        """Estimate the number of adversarial workers and targeted tasks.
+
+        Parameters
+        ----------
+        biadj_mat
+            $(M, N)$ dimensional bi-adjacency matrix of the worker-task
+            bipartite graph that `worker_scores`/`task_scores` were derived
+            from, e.g. a fitted detector's `biadj_mat_` attribute.
+        worker_scores
+            $(M, )$ dimensional array of per-worker adversary scores,
+            higher indicating higher likelihood of being adversarial, e.g.
+            a fitted detector's `worker_scores_` attribute.
+        task_scores
+            $(N, )$ dimensional array of per-task adversary scores, higher
+            indicating higher likelihood of being targeted, e.g. a fitted
+            detector's `task_scores_` attribute.
+
+        Returns
+        -------
+        n_adversaries : int
+            Estimated number of adversarial workers.
+        n_targets : int
+            Estimated number of targeted tasks.
+        """
         n_workers, n_tasks = biadj_mat.shape
 
         # Ascending suspicion -- lossless recovery of a peeling order from
