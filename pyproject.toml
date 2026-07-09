@@ -17,16 +17,17 @@ dependencies = [
     "scikit-learn>=1.5",
 ]
 
+[tool.poetry.group.dev.dependencies]
+zensical = ">=0.0.48"
+mkdocstrings-python = ">=2.0"
+ipykernel = ">=7.3.0"
+
 [project.optional-dependencies]
 experiments = [
     "crowd-kit>=1.4",
     "click>=8.1",
     "matplotlib>=3.9",
     "seaborn>=0.13",
-]
-docs = [
-    "zensical>=0.0.48",
-    "mkdocstrings-python>=2.0",
 ]
 
 [tool.poetry]
