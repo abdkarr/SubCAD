@@ -237,8 +237,6 @@ def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
         for adv_frac in adv_fracs:
             for target_frac in target_fracs:
                 for scale in scales:
-                    print(adv_frac, target_frac)
-
                     if cfg["aggregator"] == "mv":
                         aggregator = subcad.WeightedMajorityVoting(
                             float(adv_frac), float(target_frac), float(scale)
