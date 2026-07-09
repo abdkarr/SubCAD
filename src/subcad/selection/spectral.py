@@ -55,12 +55,26 @@ class SpectralSeededSelector:
     keeps the honest majority from dominating the SVD with its own
     consensus pattern and drowning out the adversary-specific signal.
 
-    Validated across four synthetic configs (balanced/skewed task:worker
-    ratio x easy/hard camouflage difficulty; see the investigation note):
-    mean size estimate 0.96x-1.12x of the true count on 3 of 4 configs
-    (worker and task side both), including the axis ("skewed/hard"
-    task-side) that every density-based and label-content method tried
-    earlier could not predict well (0.99x +/- 0.03 here).
+    The worker-side stage additionally degree-normalizes the pooled
+    submatrix's rows ($D^{-1/2}$, the same normalization used in
+    normalized spectral clustering) before the SVD. Without it, a handful
+    of highly prolific honest workers can dominate the top singular vector
+    by raw response volume alone and bury the (smaller-magnitude but
+    structurally coherent) adversary block -- this was the dominant
+    failure mode found when benchmarking against `DensitySelector` on the
+    `scripts/planted_attacks.py` setup across all six bundled real
+    datasets and a sweep of `adv_frac`/`target_frac`/`target_obs`/
+    `camo_reliability`, and cut the mean worker-count log-error roughly in
+    half there. The task-side stage is deliberately left unnormalized:
+    once rows are restricted to the worker seed, raw column magnitude
+    (how much attack weight landed on a task) is itself the useful
+    signal, and degree-normalizing it away was found to hurt task-count
+    accuracy in the same benchmark. `worker_pool_frac` defaults lower than
+    `task_pool_frac` (0.5 vs 0.7) since shrinking the worker pool reduces
+    noise from uninvolved honest workers without risk (the true
+    adversary fraction rarely approaches 50% of workers), whereas
+    shrinking the task pool below the true target fraction hard-caps how
+    many targeted tasks can ever be recovered.
 
     Parameters
     ----------
@@ -85,7 +99,7 @@ class SpectralSeededSelector:
         ```
     """
 
-    def __init__(self, worker_pool_frac: float = 0.7, task_pool_frac: float = 0.7):
+    def __init__(self, worker_pool_frac: float = 0.5, task_pool_frac: float = 0.7):
         self.worker_pool_frac = worker_pool_frac
         self.task_pool_frac = task_pool_frac
 
@@ -127,16 +141,22 @@ class SpectralSeededSelector:
         task_pool = np.argsort(-task_scores)[:task_pool_size]
 
         # Stage 1: worker-side estimate from the pooled submatrix's top
-        # left singular vector.
-        sub1 = biadj_mat[np.ix_(worker_pool, task_pool)]
-        u, _, _ = np.linalg.svd(sub1, full_matrices=False)
+        # left singular vector. Rows are D^-1/2 degree-normalized first so
+        # a few high-volume honest workers can't dominate the singular
+        # vector by raw magnitude and bury the adversary block.
+        sub1 = biadj_mat[np.ix_(worker_pool, task_pool)].astype(float)
+        row_deg = sub1.sum(axis=1, keepdims=True)
+        row_deg[row_deg == 0] = 1.0
+        u, _, _ = np.linalg.svd(sub1 / np.sqrt(row_deg), full_matrices=False)
         u1 = np.abs(u[:, 0])
         worker_order_in_pool = np.argsort(-u1)
         n_adversaries = _otsu_cut(u1[worker_order_in_pool])
         worker_seed = worker_pool[worker_order_in_pool[:n_adversaries]]
 
         # Stage 2: task-side estimate, restricting rows to just the worker
-        # seed so the honest majority doesn't dominate the SVD.
+        # seed so the honest majority doesn't dominate the SVD. Left
+        # unnormalized -- with only the worker seed as rows, raw column
+        # magnitude is itself the useful attack-concentration signal.
         sub2 = biadj_mat[np.ix_(worker_seed, task_pool)]
         _, _, vt2 = np.linalg.svd(sub2, full_matrices=False)
         v1 = np.abs(vt2[0, :])

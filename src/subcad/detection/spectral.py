@@ -6,7 +6,7 @@ from .base import _calc_adversary_scores, _construct_biadj_mat
 
 
 class SpectralDetector:
-    """Adversary detector using the leading singular vectors of the
+    r"""Adversary detector using the leading singular vectors of the
     bipartite graph's biadjacency matrix.
 
     The detection is performed by first constructing a bipartite graph
@@ -29,11 +29,31 @@ class SpectralDetector:
     Pair with a selector from `subcad.selection` (e.g.
     `SpectralSeededSelector`) for a size estimate.
 
+    `normalize=True` degree-normalizes `biadj_mat`'s rows ($A_{ij}/\sqrt{d_i}$,
+    $d_i$ = worker $i$'s degree) before the SVD, so a handful of highly
+    prolific workers can't dominate the top singular vector by raw response
+    volume alone and bury a smaller-magnitude but structurally coherent
+    adversary block -- the same hub-domination issue diagnosed for
+    `subcad.selection.SpectralSeededSelector` (see the "Adversary Size
+    Estimation Investigation" note, Phase 5). Benchmarked against the
+    `scripts/planted_attacks.py` setup across all six bundled real datasets:
+    improved both `WorkerROCAUC` (0.92->0.95) and `TaskROCAUC` (0.91->0.95)
+    on average, with no regression found in any dataset or swept
+    `adv_frac`/`target_frac`/`target_obs`/`camo_reliability` config.
+    Symmetric normalization ($A_{ij}/\sqrt{d_i d_j}$, also normalizing task
+    degree) was tried too and performed worse (worker-side `AP` dropped
+    sharply) -- not exposed as an option here. Off by default for backward
+    compatibility. Peeling-based detectors (`GreedyDetector`/
+    `GreedyPPDetector`) do not have an equivalent flag: the same
+    normalization was tested there too and consistently *hurt* ranking
+    quality (their raw-degree comparison is the mechanism that already
+    works, not a bug to fix).
+
     !!! Example
         ```python
         from subcad.detection import SpectralDetector
 
-        detector = SpectralDetector(kind="weighted")
+        detector = SpectralDetector(kind="weighted", normalize=True)
         worker_scores, task_scores = detector.fit_predict(response_mat)
         ```
 
@@ -43,6 +63,9 @@ class SpectralDetector:
         Kind of bipartite graph to construct. Must be either "binary" or
         "weighted". In the latter case, the edges of the bipartite graph
         are weighted using worker agreement rates and co-labeling.
+    normalize
+        If `True`, degree-normalize `biadj_mat`'s rows before the SVD (see
+        above). Defaults to `False`.
 
     Attributes
     ----------
@@ -60,8 +83,9 @@ class SpectralDetector:
         targeted task. Set after calling `fit`.
     """
 
-    def __init__(self, kind: str = "binary"):
+    def __init__(self, kind: str = "binary", normalize: bool = False):
         self.kind = kind
+        self.normalize = normalize
 
     def fit(self, response_mat: npt.NDArray, y=None) -> "SpectralDetector":
         """Detect adversarial workers and their targeted tasks.
@@ -118,9 +142,16 @@ class SpectralDetector:
     def _peel(self, biadj_mat: npt.NDArray):
         """
         Rank workers/tasks by their loading magnitude in the top left/right
-        singular vector of `biadj_mat`.
+        singular vector of `biadj_mat` (optionally row-degree-normalized
+        first, see `normalize`).
         """
-        u, _, vt = np.linalg.svd(biadj_mat, full_matrices=False)
+        mat = biadj_mat
+        if self.normalize:
+            row_deg = mat.sum(axis=1, keepdims=True)
+            row_deg = np.where(row_deg == 0, 1.0, row_deg)
+            mat = mat / np.sqrt(row_deg)
+
+        u, _, vt = np.linalg.svd(mat, full_matrices=False)
         worker_loadings = np.abs(u[:, 0])
         task_loadings = np.abs(vt[0, :])
 
