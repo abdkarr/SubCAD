@@ -6,10 +6,7 @@ import numpy as np
 def _otsu_cut(scores_desc: npt.NDArray, min_k: int = 1) -> int:
     """
     Cut a descending-sorted score array via Otsu's method: the threshold
-    that maximizes between-group variance of a 2-way split. Uses the whole
-    distribution's shape rather than a single local difference, so it is
-    far less sensitive to one noisy neighbor-to-neighbor jump than a
-    largest-gap cut.
+    that maximizes between-group variance of a 2-way split.
     """
     n = len(scores_desc)
     if n <= min_k:
@@ -30,51 +27,25 @@ def _otsu_cut(scores_desc: npt.NDArray, min_k: int = 1) -> int:
 
 
 class SpectralSeededSelector:
-    """Two-stage seeded spectral size selector (Phase 4 of the "Adversary
-    Size Estimation Investigation").
+    """Two-stage seeded spectral size selector.
 
-    A size selector estimates the number of adversarial workers and
-    targeted tasks from adversary scores, independently of how those
-    scores were produced. It is deliberately decoupled from
-    `subcad.detection`'s detectors: `select` takes a bipartite graph and a
-    pair of pre-ranked score arrays (ascending suspicion, i.e. the same
-    convention as a detector's `worker_scores_`/`task_scores_`) and returns
-    a size estimate for each side, so any detector's scores -- or an
-    ensembled combination of several -- can be paired with this selector.
+    This method pools candidate workers/tasks by rank, takes the top left singular 
+    vector of the pooled biadjacency submatrix and cuts it via Otsu's method for 
+    a worker-side estimate, then uses that worker estimate as a *seed* to compute 
+    the top right singular vector of (seed workers x task pool). Right singular 
+    vector is cut via Otsu  for the task-side estimate. Seeding the task-side 
+    stage with a tight worker estimate keeps the honest majority from dominating 
+    the SVD with its own consensus pattern and drowning out the adversary-specific 
+    signal.
 
-    Unlike `DensitySelector`, this method looks past
-    `worker_scores`/`task_scores` at `biadj_mat` itself: it pools
-    candidate workers/tasks by rank (top
-    `worker_pool_frac`/`task_pool_frac` fraction each), takes the top left
-    singular vector of the pooled biadjacency submatrix and cuts it via
-    Otsu's method for a worker-side estimate, then uses that worker
-    estimate as a *seed* -- rather than the full (still mostly honest)
-    pool -- to compute the top right singular vector of
-    (seed workers x task pool), again cut via Otsu, for the task-side
-    estimate. Seeding the task-side stage with a tight worker estimate
-    keeps the honest majority from dominating the SVD with its own
-    consensus pattern and drowning out the adversary-specific signal.
-
-    The worker-side stage additionally degree-normalizes the pooled
-    submatrix's rows ($D^{-1/2}$, the same normalization used in
-    normalized spectral clustering) before the SVD. Without it, a handful
-    of highly prolific honest workers can dominate the top singular vector
-    by raw response volume alone and bury the (smaller-magnitude but
-    structurally coherent) adversary block -- this was the dominant
-    failure mode found when benchmarking against `DensitySelector` on the
-    `scripts/planted_attacks.py` setup across all six bundled real
-    datasets and a sweep of `adv_frac`/`target_frac`/`target_obs`/
-    `camo_reliability`, and cut the mean worker-count log-error roughly in
-    half there. The task-side stage is deliberately left unnormalized:
-    once rows are restricted to the worker seed, raw column magnitude
-    (how much attack weight landed on a task) is itself the useful
-    signal, and degree-normalizing it away was found to hurt task-count
-    accuracy in the same benchmark. `worker_pool_frac` defaults lower than
-    `task_pool_frac` (0.5 vs 0.7) since shrinking the worker pool reduces
-    noise from uninvolved honest workers without risk (the true
-    adversary fraction rarely approaches 50% of workers), whereas
-    shrinking the task pool below the true target fraction hard-caps how
-    many targeted tasks can ever be recovered.
+    The worker-side stage degree-normalizes the pooled submatrix's rows ($D^{-1/2}$) 
+    before the SVD. Without it, a handful of highly prolific honest workers can 
+    dominate the top singular vector by raw response volume alone and bury the 
+    (smaller-magnitude but structurally coherent) adversary block. The task-side 
+    stage is deliberately left unnormalized: once rows are restricted to the 
+    worker seed, raw column magnitude (how much attack weight landed on a task) 
+    is itself the useful signal, and degree-normalizing it away was found to hurt 
+    task-count accuracy.
 
     Parameters
     ----------
@@ -87,19 +58,18 @@ class SpectralSeededSelector:
 
     Examples
     --------
-    !!! Example
-        ```python
-        from subcad import SpectralDetector
-        from subcad.selection import SpectralSeededSelector
+    ```python
+    from subcad import SpectralDetector
+    from subcad.selection import SpectralSeededSelector
 
-        detector = SpectralDetector(kind="weighted").fit(response_mat)
-        n_adversaries, n_targets = SpectralSeededSelector().select(
-            detector.biadj_mat_, detector.worker_scores_, detector.task_scores_
-        )
-        ```
+    detector = SpectralDetector(kind="weighted").fit(response_mat)
+    n_adversaries, n_targets = SpectralSeededSelector().select(
+        detector.biadj_mat_, detector.worker_scores_, detector.task_scores_
+    )
+    ```
     """
 
-    def __init__(self, worker_pool_frac: float = 0.5, task_pool_frac: float = 0.7):
+    def __init__(self, worker_pool_frac: float = 0.5, task_pool_frac: float = 0.5):
         self.worker_pool_frac = worker_pool_frac
         self.task_pool_frac = task_pool_frac
 
