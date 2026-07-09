@@ -71,6 +71,8 @@ class SpectralSeededSelector:
         Fraction of tasks (by score, highest first) to pool for both
         stages' task columns.
 
+    Examples
+    --------
     !!! Example
         ```python
         from subcad import SpectralDetector

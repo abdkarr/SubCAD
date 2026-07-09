@@ -24,6 +24,10 @@ experiments = [
     "matplotlib>=3.9",
     "seaborn>=0.13",
 ]
+docs = [
+    "zensical>=0.0.48",
+    "mkdocstrings-python>=2.0",
+]
 
 [tool.poetry]
 packages = [{include = "subcad", from = "src"}]
