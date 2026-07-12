@@ -3,7 +3,7 @@ import numpy.typing as npt
 import numpy as np
 import networkx as nx
 
-from .base import _calc_adversary_scores, _construct_biadj_mat
+from .base import _calc_adversary_penalties, _calc_adversary_scores, _construct_biadj_mat
 
 
 class GreedyPPDetector:
@@ -122,6 +122,60 @@ class GreedyPPDetector:
         """
         self.fit(response_mat)
         return self.worker_scores_, self.task_scores_
+
+    def aggregation_penalties(
+        self, adv_frac: float = 0.2, target_frac: float = 0.2, scale: float = 5
+    ) -> tuple[npt.NDArray, npt.NDArray]:
+        """Compute adversary-aware aggregation penalties from this detector's scores.
+
+        Applies a sigmoid cutoff to `worker_scores_`/`task_scores_`,
+        producing $[0, 1]$-valued `worker_penalties`/`task_penalties` that
+        approach 1 for workers/tasks ranked above the expected adversarial
+        fraction (higher = less trustworthy). An adversary-aware
+        aggregator (e.g. `subcad.aggregators.WeightedMajorityVoting`,
+        `subcad.aggregators.WeightedDawidSkene`) combines the returned
+        `worker_penalties`/`task_penalties` as
+        `1 - worker_penalties[i] * task_penalties[j]` to weight worker
+        `i`'s response to task `j`. Must be called after `fit`.
+
+        !!! Example
+            ```python
+            from subcad import GreedyPPDetector
+            from subcad.aggregators import WeightedMajorityVoting
+
+            detector = GreedyPPDetector(kind="weighted").fit(response_mat)
+            worker_penalties, task_penalties = detector.aggregation_penalties()
+            labels_hat = WeightedMajorityVoting().fit_predict(
+                response_mat, worker_penalties, task_penalties
+            )
+            ```
+
+        Parameters
+        ----------
+        adv_frac
+            Expected fraction of workers that are adversarial. Sets the
+            cutoff of the sigmoid applied to `worker_scores_`: workers
+            ranked above the top `adv_frac` fraction are penalized.
+        target_frac
+            Expected fraction of tasks that are targeted. Sets the cutoff
+            of the sigmoid applied to `task_scores_`: tasks ranked above
+            the top `target_frac` fraction are penalized.
+        scale
+            Steepness of the sigmoid transition at the
+            `adv_frac`/`target_frac` cutoffs.
+
+        Returns
+        -------
+        worker_penalties : npt.NDArray
+            $(M, )$ dimensional array of per-worker, $[0, 1]$-valued
+            aggregation penalties (higher meaning less trustworthy).
+        task_penalties : npt.NDArray
+            $(N, )$ dimensional array of per-task, $[0, 1]$-valued
+            aggregation penalties (higher meaning less trustworthy).
+        """
+        return _calc_adversary_penalties(
+            self.worker_scores_, self.task_scores_, adv_frac, target_frac, scale
+        )
 
     def _peel(self, biadj_mat: npt.NDArray):
         """

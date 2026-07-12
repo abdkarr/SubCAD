@@ -3,6 +3,7 @@ import numpy.typing as npt
 import numpy as np
 
 from numba import njit
+from scipy.special import expit
 
 from ..calc_agreement_mat import calc_agreement_mat
 
@@ -83,3 +84,27 @@ def _calc_adversary_scores(workers_order, tasks_order):
     task_scores = task_scores / n_tasks
 
     return worker_scores, task_scores
+
+
+def _sigmoid(x, frac=0.2, scale=5):
+    return expit(-(x - frac) * scale * 10)
+
+
+def _calc_adversary_penalties(
+    worker_scores: npt.NDArray,
+    task_scores: npt.NDArray,
+    adv_frac: float = 0.2,
+    target_frac: float = 0.2,
+    scale: float = 5,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """
+    Convert adversary scores into adversary-aware aggregation penalties via
+    a sigmoid cutoff, so that workers/tasks ranked above the expected
+    adversarial fraction get a penalty close to 1 (i.e. not trustworthy --
+    see each detector's `aggregation_penalties` method, whose shared
+    implementation this is, for the combination convention).
+    """
+    worker_penalties = _sigmoid(1 - worker_scores, frac=adv_frac, scale=scale)
+    task_penalties = _sigmoid(1 - task_scores, frac=target_frac, scale=scale)
+
+    return worker_penalties, task_penalties

@@ -237,22 +237,20 @@ def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
         for adv_frac in adv_fracs:
             for target_frac in target_fracs:
                 for scale in scales:
+                    worker_penalties, task_penalties = detector.aggregation_penalties(
+                        float(adv_frac), float(target_frac), float(scale)
+                    )
+
                     if cfg["aggregator"] == "mv":
-                        aggregator = subcad.WeightedMajorityVoting(
-                            float(adv_frac), float(target_frac), float(scale)
-                        )
+                        aggregator = subcad.WeightedMajorityVoting()
                         aggregator_label = "MV"
                     elif cfg["aggregator"] == "ds":
-                        aggregator = subcad.WeightedDawidSkene(
-                            adv_frac=float(adv_frac),
-                            target_frac=float(target_frac),
-                            scale=float(scale),
-                        )
+                        aggregator = subcad.WeightedDawidSkene()
                         aggregator_label = "DS"
                     else:
                         raise ValueError(f"Unknown aggregator '{cfg['aggregator']}' in method cfg.")
 
-                    labels = aggregator.fit_predict(response_mat, worker_scores, task_scores)
+                    labels = aggregator.fit_predict(response_mat, worker_penalties, task_penalties)
 
                     yield ModelResult(
                         label=f"SubCAD{detector_label}{selector_label}{aggregator_label}",

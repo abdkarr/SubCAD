@@ -3,7 +3,7 @@ import numpy.typing as npt
 
 from scipy import sparse
 
-from .weighted_majority_voting import WeightedMajorityVoting, _sigmoid
+from .weighted_majority_voting import WeightedMajorityVoting
 
 
 class WeightedDawidSkene:
@@ -11,10 +11,13 @@ class WeightedDawidSkene:
 
     Same Dawid-Skene EM algorithm as `DawidSkene`, except each worker's
     contribution to a task's onehot label (used to seed the confusion
-    matrices) is downweighted by a sigmoid of its adversary score
-    (`worker_scores`) and that task's targeted-task score (`task_scores`),
-    same mechanism as `WeightedMajorityVoting`, which is also used to
-    initialize EM here instead of plain majority voting.
+    matrices) is weighted by `1 - worker_penalties[i] * task_penalties[j]`
+    (`worker_penalties`/`task_penalties` are $[0, 1]$-valued, higher
+    meaning less trustworthy), same mechanism as `WeightedMajorityVoting`,
+    which is also used to initialize EM here instead of plain majority
+    voting. `worker_penalties`/`task_penalties` are computed ahead of
+    time, e.g. via a fitted detector's `aggregation_penalties` method (see
+    `subcad.detection.GreedyDetector.aggregation_penalties`).
 
     !!! Example
         ```python
@@ -22,24 +25,14 @@ class WeightedDawidSkene:
         from subcad.aggregators import WeightedDawidSkene
 
         detector = GreedyDetector(kind="weighted").fit(response_mat)
+        worker_penalties, task_penalties = detector.aggregation_penalties()
         labels_hat = WeightedDawidSkene().fit_predict(
-            response_mat, detector.worker_scores_, detector.task_scores_
+            response_mat, worker_penalties, task_penalties
         )
         ```
 
     Parameters
     ----------
-    adv_frac
-        Expected fraction of workers that are adversarial. Sets the
-        cutoff of the sigmoid applied to worker scores: workers ranked
-        above the top `adv_frac` fraction are downweighted.
-    target_frac
-        Expected fraction of tasks that are targeted. Sets the cutoff of
-        the sigmoid applied to task scores: tasks ranked above the top
-        `target_frac` fraction are downweighted.
-    scale
-        Steepness of the sigmoid transition at the `adv_frac`/`target_frac`
-        cutoffs.
     max_iter
         Maximum number of EM iterations.
     tol
@@ -64,23 +57,17 @@ class WeightedDawidSkene:
 
     def __init__(
         self,
-        adv_frac: float = 0.2,
-        target_frac: float = 0.2,
-        scale: float = 5,
         max_iter: int = 100,
         tol: float = 1e-6,
     ):
-        self.adv_frac = adv_frac
-        self.target_frac = target_frac
-        self.scale = scale
         self.max_iter = max_iter
         self.tol = tol
 
     def fit(
         self,
         response_mat: npt.NDArray,
-        worker_scores: npt.NDArray,
-        task_scores: npt.NDArray,
+        worker_penalties: npt.NDArray,
+        task_penalties: npt.NDArray | None = None,
         y=None,
     ) -> "WeightedDawidSkene":
         """Estimate task labels via adversary-aware weighted Dawid-Skene.
@@ -92,12 +79,16 @@ class WeightedDawidSkene:
             label provided by $i$th worker for $j$th task.
             `response_mat[i, j] = 0` is assumed to indicate no label is
             given by $i$th worker for $j$th task.
-        worker_scores
-            $(M, )$ dimensional array of per-worker adversary scores,
-            e.g. a fitted detector's `worker_scores_` attribute.
-        task_scores
-            $(N, )$ dimensional array of per-task adversary scores, e.g.
-            a fitted detector's `task_scores_` attribute.
+        worker_penalties
+            $(M, )$ dimensional, $[0, 1]$-valued array of per-worker
+            aggregation penalties (higher meaning less trustworthy), e.g.
+            from a fitted detector's `aggregation_penalties` method.
+        task_penalties
+            $(N, )$ dimensional, $[0, 1]$-valued array of per-task
+            aggregation penalties (higher meaning less trustworthy), e.g.
+            from a fitted detector's `aggregation_penalties` method. If
+            `None`, tasks do not affect the weighting -- contributions are
+            weighted only by `worker_penalties`.
         y
             Ignored. Present for API consistency.
 
@@ -115,19 +106,17 @@ class WeightedDawidSkene:
         # Initialize structure for EM algorithm
         onehot_labels = []
         confusion_mats = []
-        mv_labels = WeightedMajorityVoting(
-            adv_frac=self.adv_frac, target_frac=self.target_frac, scale=self.scale
-        ).fit_predict(response_mat, worker_scores, task_scores)
+        mv_labels = WeightedMajorityVoting().fit_predict(
+            response_mat, worker_penalties, task_penalties
+        )
         for m in range(n_workers):
             m_tasks = np.where(response_mat[m, :])[0]
             m_responses = np.array([class_to_idx[l] for l in response_mat[m, m_tasks]])
 
-            weights = [
-                1
-                - _sigmoid(1 - worker_scores[m], frac=self.adv_frac, scale=self.scale)
-                * _sigmoid(1 - task_scores[t], frac=self.target_frac, scale=self.scale)
-                for t in m_tasks
-            ]
+            if task_penalties is None:
+                weights = np.full(len(m_tasks), 1 - worker_penalties[m])
+            else:
+                weights = 1 - worker_penalties[m] * task_penalties[m_tasks]
 
             onehot_labels.append(
                 sparse.csr_array(
@@ -212,8 +201,8 @@ class WeightedDawidSkene:
     def fit_predict(
         self,
         response_mat: npt.NDArray,
-        worker_scores: npt.NDArray,
-        task_scores: npt.NDArray,
+        worker_penalties: npt.NDArray,
+        task_penalties: npt.NDArray | None = None,
         y=None,
     ) -> npt.NDArray:
         """Fit the aggregator and return the estimated task labels.
@@ -222,7 +211,7 @@ class WeightedDawidSkene:
 
         Parameters
         ----------
-        response_mat, worker_scores, task_scores
+        response_mat, worker_penalties, task_penalties
             See `fit`.
         y
             Ignored. Present for API consistency.
@@ -232,5 +221,5 @@ class WeightedDawidSkene:
         labels : npt.NDArray
             See `labels_`.
         """
-        self.fit(response_mat, worker_scores, task_scores)
+        self.fit(response_mat, worker_penalties, task_penalties)
         return self.labels_

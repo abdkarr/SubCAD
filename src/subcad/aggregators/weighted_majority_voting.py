@@ -2,21 +2,18 @@ import numpy as np
 
 import numpy.typing as npt
 
-from scipy.special import expit
-
-
-def _sigmoid(x, frac=0.2, scale=5):
-    return expit(-(x - frac) * scale * 10)
-
 
 class WeightedMajorityVoting:
     """Adversary-aware weighted majority-voting label aggregator.
 
     Each task's label is estimated as a weighted majority vote, where each
-    worker's vote is downweighted by a sigmoid of its adversary score
-    (`worker_scores`) and the targeted-task score of the task being voted
-    on (`task_scores`), so that suspicious workers voting on suspicious
-    tasks contribute little.
+    worker's vote is weighted by `1 - worker_penalties[i] * task_penalties[j]`
+    (`worker_penalties`/`task_penalties` are $[0, 1]$-valued, higher
+    meaning less trustworthy), so that an untrustworthy worker voting on
+    an untrustworthy task contributes little. `worker_penalties`/
+    `task_penalties` are computed ahead of time, e.g. via a fitted
+    detector's `aggregation_penalties` method (see
+    `subcad.detection.GreedyDetector.aggregation_penalties`).
 
     !!! Example
         ```python
@@ -24,24 +21,11 @@ class WeightedMajorityVoting:
         from subcad.aggregators import WeightedMajorityVoting
 
         detector = GreedyDetector(kind="weighted").fit(response_mat)
+        worker_penalties, task_penalties = detector.aggregation_penalties()
         labels_hat = WeightedMajorityVoting().fit_predict(
-            response_mat, detector.worker_scores_, detector.task_scores_
+            response_mat, worker_penalties, task_penalties
         )
         ```
-
-    Parameters
-    ----------
-    adv_frac
-        Expected fraction of workers that are adversarial. Sets the
-        cutoff of the sigmoid applied to worker scores: workers ranked
-        above the top `adv_frac` fraction are downweighted.
-    target_frac
-        Expected fraction of tasks that are targeted. Sets the cutoff of
-        the sigmoid applied to task scores: tasks ranked above the top
-        `target_frac` fraction are downweighted.
-    scale
-        Steepness of the sigmoid transition at the `adv_frac`/`target_frac`
-        cutoffs.
 
     Attributes
     ----------
@@ -51,21 +35,11 @@ class WeightedMajorityVoting:
         `fit`.
     """
 
-    def __init__(
-        self,
-        adv_frac: float = 0.2,
-        target_frac: float = 0.2,
-        scale: float = 5,
-    ):
-        self.adv_frac = adv_frac
-        self.target_frac = target_frac
-        self.scale = scale
-
     def fit(
         self,
         response_mat: npt.NDArray,
-        worker_scores: npt.NDArray,
-        task_scores: npt.NDArray,
+        worker_penalties: npt.NDArray,
+        task_penalties: npt.NDArray | None = None,
         y=None,
     ) -> "WeightedMajorityVoting":
         """Estimate task labels via adversary-aware weighted majority voting.
@@ -77,12 +51,16 @@ class WeightedMajorityVoting:
             label provided by $i$th worker for $j$th task.
             `response_mat[i, j] = 0` is assumed to indicate no label is
             given by $i$th worker for $j$th task.
-        worker_scores
-            $(M, )$ dimensional array of per-worker adversary scores,
-            e.g. a fitted detector's `worker_scores_` attribute.
-        task_scores
-            $(N, )$ dimensional array of per-task adversary scores, e.g.
-            a fitted detector's `task_scores_` attribute.
+        worker_penalties
+            $(M, )$ dimensional, $[0, 1]$-valued array of per-worker
+            aggregation penalties (higher meaning less trustworthy), e.g.
+            from a fitted detector's `aggregation_penalties` method.
+        task_penalties
+            $(N, )$ dimensional, $[0, 1]$-valued array of per-task
+            aggregation penalties (higher meaning less trustworthy), e.g.
+            from a fitted detector's `aggregation_penalties` method. If
+            `None`, tasks do not affect the weighting -- votes are
+            weighted only by `worker_penalties`.
         y
             Ignored. Present for API consistency.
 
@@ -100,15 +78,10 @@ class WeightedMajorityVoting:
         for t in range(n_tasks):
             t_workers = np.where(response_mat[:, t])[0]
 
-            weights = np.array(
-                [
-                    1
-                    - _sigmoid(1 - worker_scores[w], frac=self.adv_frac, scale=self.scale)
-                    * _sigmoid(1 - task_scores[t], frac=self.target_frac, scale=self.scale)
-                    for w in t_workers
-                ]
-            )
-
+            if task_penalties is None:
+                weights = 1 - worker_penalties[t_workers]
+            else:
+                weights = 1 - worker_penalties[t_workers] * task_penalties[t]
             t_labels = response_mat[t_workers, t]
 
             max_weight = -np.inf
@@ -127,8 +100,8 @@ class WeightedMajorityVoting:
     def fit_predict(
         self,
         response_mat: npt.NDArray,
-        worker_scores: npt.NDArray,
-        task_scores: npt.NDArray,
+        worker_penalties: npt.NDArray,
+        task_penalties: npt.NDArray | None = None,
         y=None,
     ) -> npt.NDArray:
         """Fit the aggregator and return the estimated task labels.
@@ -137,7 +110,7 @@ class WeightedMajorityVoting:
 
         Parameters
         ----------
-        response_mat, worker_scores, task_scores
+        response_mat, worker_penalties, task_penalties
             See `fit`.
         y
             Ignored. Present for API consistency.
@@ -147,5 +120,5 @@ class WeightedMajorityVoting:
         labels : npt.NDArray
             See `labels_`.
         """
-        self.fit(response_mat, worker_scores, task_scores)
+        self.fit(response_mat, worker_penalties, task_penalties)
         return self.labels_
