@@ -23,6 +23,7 @@ Usage in an experiment script
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator
 
 import numpy as np
@@ -30,14 +31,8 @@ import numpy.typing as npt
 from sklearn import metrics as sk_metrics
 
 import subcad
-from subcad import GreedyDetector, GreedyPPDetector, SpectralDetector
-from subcad.selection import DensitySelector, SpectralSeededSelector
-from subcad.aggregators import (
-    MajorityVoting,
-    DawidSkene,
-    WeightedMajorityVoting,
-    WeightedDawidSkene,
-)
+
+MSCRIPTS_DIR = Path(subcad.PROJECT_DIR, "research", "mscripts")
 
 
 def _resolve_array(cfg: dict, key: str) -> npt.NDArray:
@@ -248,9 +243,13 @@ def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
                         aggregator = subcad.WeightedDawidSkene()
                         aggregator_label = "DS"
                     else:
-                        raise ValueError(f"Unknown aggregator '{cfg['aggregator']}' in method cfg.")
+                        raise ValueError(
+                            f"Unknown aggregator '{cfg['aggregator']}' in method cfg."
+                        )
 
-                    labels = aggregator.fit_predict(response_mat, worker_penalties, task_penalties)
+                    labels = aggregator.fit_predict(
+                        response_mat, worker_penalties, task_penalties
+                    )
 
                     yield ModelResult(
                         label=f"SubCAD{detector_label}{selector_label}{aggregator_label}",
@@ -267,12 +266,147 @@ def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
                         labels_hat=labels,
                     )
 
+
+def _start_matlab_engine(method: str):
+    """Import the MATLAB Engine for Python and start an engine session.
+
+    Not a poetry dependency: `matlabengine` isn't a portable PyPI package
+    (its version must match the caller's local MATLAB release), so it's
+    imported lazily here rather than declared in `pyproject.toml`.
+    """
+    try:
+        import matlab
+        import matlab.engine
+    except ImportError as e:
+        raise ImportError(
+            f"{method} requires the MATLAB Engine for Python, which ships "
+            "with a MATLAB install but isn't a poetry dependency (it isn't "
+            "a portable PyPI package -- its version must match your local "
+            "MATLAB release). Install it into this project's virtualenv "
+            "with `pip install <MATLABROOT>/extern/engines/python`, where "
+            "MATLABROOT is your MATLAB install directory."
+        ) from e
+
+    eng = matlab.engine.start_matlab()
+    eng.addpath(eng.genpath(str(MSCRIPTS_DIR)), nargout=0)
+    eng.warning("off", "all", nargout=0)
+    return matlab, eng
+
+
+def run_dacs(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Detect adversaries with the MATLAB DACS implementation, then aggregate.
+
+    Starts a MATLAB engine and calls `research/mscripts/dacs/dacs.m` to get a
+    hard honest/adversary worker partition. That partition is used directly as
+    `worker_penalties` for `subcad.WeightedDawidSkene`, which zeroes out the
+    contribution of workers DACS flags as adversarial.
+    """
+
+    n_workers, _ = response_mat.shape
+    n_classes = len(np.unique(response_mat[response_mat > 0]))
+    try:
+        rhos = _resolve_array(cfg, "rho")
+    except ValueError:
+        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
+
+    # Detection using MATLAB
+    matlab, eng = _start_matlab_engine("DACS")
+    try:
+        f = matlab.double(response_mat.tolist())
+        rhos_mat = matlab.double(rhos.tolist())
+        groups = eng.dacs(f, float(n_classes), rhos_mat, nargout=1)
+        groups = np.array(groups, dtype=float).flatten()
+    finally:
+        eng.quit()
+
+    # Take the smaller cluster as the adversary group
+    if groups.sum() > n_workers - groups.sum():
+        groups = 1 - groups
+    worker_penalties = groups
+
+    # Aggregation
+    aggregator = subcad.WeightedDawidSkene()
+    labels = aggregator.fit_predict(response_mat, worker_penalties, None)
+
+    yield ModelResult(
+        label=f"DACS",
+        params={"rhos": rhos.tolist()},
+        worker_scores=worker_penalties,
+        labels_hat=labels,
+    )
+
+
+def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Detect adversaries with the MATLAB MMSR implementation, then aggregate.
+
+    Starts a MATLAB engine and calls `research/mscripts/mmsr/mmsr.m` to get a
+    continuous per-worker reliability score `probWorker` (higher means more
+    honest) and `predlabel`.
+    """
+    n_classes = len(np.unique(response_mat[response_mat > 0]))
+
+    matlab, eng = _start_matlab_engine("MMSR")
+    try:
+        f = matlab.double(response_mat.tolist())
+        prob_worker, predlabel = eng.mmsr(f, float(n_classes), nargout=2)
+        prob_worker = np.array(prob_worker, dtype=float).flatten()
+        labels = np.array(predlabel, dtype=int).flatten()
+    finally:
+        eng.quit()
+
+    worker_scores = np.clip(1 - prob_worker, 0, 1)
+
+    yield ModelResult(
+        label="MMSR",
+        params={},
+        worker_scores=worker_scores,
+        labels_hat=labels,
+    )
+
+
+def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Detect adversaries with the MATLAB RepAlg implementation, then aggregate.
+
+    Starts a MATLAB engine and calls `research/mscripts/repalg.m`, which returns 
+    a continuous per-worker score, representing workers' penalty. The penalties 
+    are used as `worker_penalties` in `subcad.WeightedDawidSkene` to find labels.
+    """
+    class_ids = np.unique(response_mat[response_mat > 0])
+    if len(class_ids) != 2:
+        raise ValueError(
+            f"RepAlg only supports binary classification, got {len(class_ids)} classes."
+        )
+
+    matlab, eng = _start_matlab_engine("RepAlg")
+    try:
+        f = matlab.double(response_mat.tolist())
+        scores = eng.repalg(f, nargout=1)
+        scores = np.array(scores, dtype=float).flatten()
+    finally:
+        eng.quit()
+
+    worker_penalties = np.clip(scores, 0, 1)
+
+    aggregator = subcad.WeightedDawidSkene()
+    labels = aggregator.fit_predict(response_mat, worker_penalties, None)
+
+    yield ModelResult(
+        label="RepAlg",
+        params={},
+        worker_scores=worker_penalties,
+        labels_hat=labels,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
 REGISTRY: dict[str, callable] = {
     "subcad": run_subcad,
+    "dacs": run_dacs,
+    "mmsr": run_mmsr,
+    "repalg": run_repalg,
 }
 
 LOADER = {
