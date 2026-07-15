@@ -5,7 +5,7 @@ import numpy as np
 from numba import njit
 from scipy.special import expit
 
-from ..calc_agreement_mat import calc_agreement_mat
+from ..agreement_mat import calc_agreement_mat
 
 
 @njit

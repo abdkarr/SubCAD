@@ -5,7 +5,9 @@ from numba import njit
 
 
 @njit
-def calc_agreement_mat(response_mat: npt.NDArray) -> tuple[npt.NDArray, npt.NDArray]:
+def calc_agreement_mat(
+    response_mat: npt.NDArray, fill_diagonal: bool = False
+) -> tuple[npt.NDArray, npt.NDArray]:
     n_workers = response_mat.shape[0]
 
     agreement_mat = np.zeros((n_workers, n_workers))
@@ -16,6 +18,11 @@ def calc_agreement_mat(response_mat: npt.NDArray) -> tuple[npt.NDArray, npt.NDAr
         observed_tasks.append(np.where(response_mat[i, :] > 0)[0])
 
     for i in range(n_workers):
+        if fill_diagonal:
+            n_observed_i = len(observed_tasks[i])
+            n_co_observed[i, i] = n_observed_i
+            agreement_mat[i, i] = 1.0 if n_observed_i > 0 else 0.0
+
         for j in range(i + 1, n_workers):
             co_observed = np.intersect1d(
                 observed_tasks[i], observed_tasks[j], assume_unique=True
