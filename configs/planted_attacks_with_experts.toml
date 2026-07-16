@@ -1,0 +1,105 @@
+[dataset.rte]
+name = "rte"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.3
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+[dataset.sp]
+name = "sp"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.3
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+[dataset.web]
+name = "web"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.3
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+[dataset.dog]
+name = "dog"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.6
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+[dataset.adult2]
+name = "adult2"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.6
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+[dataset.temp]
+name = "temp"
+adv_frac = 0.2
+target_frac = 0.2
+target_obs = 0.6
+camo_reliability = 2
+expert_frac = 0.2
+expert_reliability = 4
+
+####################
+
+[method.subcad-wgdmv]
+name = "subcad"
+kind = "weighted"
+detector = "greedy"
+selector = "density"
+aggregator = "mv"
+
+[method.subcad-wgdds]
+name = "subcad"
+kind = "weighted"
+detector = "greedy"
+selector = "density"
+aggregator = "ds"
+
+[method.subcad-wgsmv]
+name = "subcad"
+kind = "weighted"
+detector = "greedy"
+selector = "spectral"
+aggregator = "mv"
+
+[method.subcad-wgsds]
+name = "subcad"
+kind = "weighted"
+detector = "greedy"
+selector = "spectral"
+aggregator = "ds"
+
+[method.dacs]
+name = "dacs"
+rho = 100
+
+[method.mmsr]
+name = "mmsr"
+
+[method.repalg]
+name = "repalg"
+
+[method.glad]
+name = "glad"
+
+[method.ebcc]
+name = "ebcc"
+
+[method.la-onepass]
+name = "la-onepass"
+
+[method.la-twopass]
+name = "la-twopass"
