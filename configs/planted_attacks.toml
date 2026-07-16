@@ -69,3 +69,25 @@ kind = "weighted"
 detector = "greedy"
 selector = "spectral"
 aggregator = "ds"
+
+[method.dacs]
+name = "dacs"
+rho = 100
+
+[method.mmsr]
+name = "mmsr"
+
+[method.repalg]
+name = "repalg"
+
+[method.glad]
+name = "glad"
+
+[method.ebcc]
+name = "ebcc"
+
+[method.la-onepass]
+name = "la-onepass"
+
+[method.la-twopass]
+name = "la-twopass"

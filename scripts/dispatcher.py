@@ -28,9 +28,12 @@ from typing import Iterator
 
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
+from crowdkit.aggregation import GLAD
 from sklearn import metrics as sk_metrics
 
 import subcad
+from subcad.thirdparty import ebcc_labels, la_one_pass_labels, la_two_pass_labels
 
 MSCRIPTS_DIR = Path(subcad.PROJECT_DIR, "research", "mscripts")
 
@@ -398,6 +401,61 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
     )
 
 
+def _response_mat_to_crowdkit_df(response_mat: npt.NDArray) -> pd.DataFrame:
+    worker_idx, task_idx = np.nonzero(response_mat)
+    return pd.DataFrame(
+        {
+            "task": task_idx,
+            "worker": worker_idx,
+            "label": response_mat[worker_idx, task_idx],
+        }
+    )
+
+
+def run_glad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with GLAD (`crowdkit.aggregation.GLAD`).
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    n_tasks = response_mat.shape[1]
+    df = _response_mat_to_crowdkit_df(response_mat)
+    labels = GLAD().fit_predict(df).reindex(range(n_tasks)).to_numpy()
+
+    yield ModelResult(label="GLAD", params={}, labels_hat=labels)
+
+
+def run_ebcc(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with EBCC (`subcad.thirdparty.ebcc_labels`).
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    labels = ebcc_labels(response_mat)
+
+    yield ModelResult(
+        label="EBCC", params={}, labels_hat=labels
+    )
+
+
+def run_la_one_pass(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with the LA one-pass baseline.
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    labels = la_one_pass_labels(response_mat)
+
+    yield ModelResult(label="LAOnePass", params={}, labels_hat=labels)
+
+
+def run_la_two_pass(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with the LA two-pass baseline.
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    labels = la_two_pass_labels(response_mat)
+
+    yield ModelResult(label="LATwoPass", params={}, labels_hat=labels)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -407,6 +465,10 @@ REGISTRY: dict[str, callable] = {
     "dacs": run_dacs,
     "mmsr": run_mmsr,
     "repalg": run_repalg,
+    "glad": run_glad,
+    "ebcc": run_ebcc,
+    "la-onepass": run_la_one_pass,
+    "la-twopass": run_la_two_pass,
 }
 
 LOADER = {
