@@ -456,6 +456,26 @@ def run_la_two_pass(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[Model
     yield ModelResult(label="LATwoPass", params={}, labels_hat=labels)
 
 
+def run_mv(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with vanilla Majority Voting (`subcad.MajorityVoting`).
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    labels = subcad.MajorityVoting().fit_predict(response_mat)
+
+    yield ModelResult(label="MV", params={}, labels_hat=labels)
+
+
+def run_ds(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Aggregate task labels with vanilla Dawid-Skene (`subcad.DawidSkene`).
+
+    No adversary detection step; only produces `labels_hat`.
+    """
+    labels = subcad.DawidSkene().fit_predict(response_mat)
+
+    yield ModelResult(label="DS", params={}, labels_hat=labels)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -469,6 +489,8 @@ REGISTRY: dict[str, callable] = {
     "ebcc": run_ebcc,
     "la-onepass": run_la_one_pass,
     "la-twopass": run_la_two_pass,
+    "mv": run_mv,
+    "ds": run_ds,
 }
 
 LOADER = {

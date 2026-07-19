@@ -103,3 +103,9 @@ name = "la-onepass"
 
 [method.la-twopass]
 name = "la-twopass"
+
+[method.mv]
+name = "mv"
+
+[method.ds]
+name = "ds"
