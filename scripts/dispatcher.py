@@ -296,23 +296,15 @@ def _start_matlab_engine(method: str):
     return matlab, eng
 
 
-def run_dacs(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Detect adversaries with the MATLAB DACS implementation, then aggregate.
+def _detect_dacs_groups(response_mat: npt.NDArray, rhos: npt.NDArray) -> npt.NDArray:
+    """Run the MATLAB DACS implementation and return a hard 0/1 worker partition.
 
-    Starts a MATLAB engine and calls `research/mscripts/dacs/dacs.m` to get a
-    hard honest/adversary worker partition. That partition is used directly as
-    `worker_penalties` for `subcad.WeightedDawidSkene`, which zeroes out the
-    contribution of workers DACS flags as adversarial.
+    Calls `research/mscripts/dacs/dacs.m`, then flips the partition (if
+    needed) so `1` always denotes the smaller (adversary) cluster.
     """
-
     n_workers, _ = response_mat.shape
     n_classes = len(np.unique(response_mat[response_mat > 0]))
-    try:
-        rhos = _resolve_array(cfg, "rho")
-    except ValueError:
-        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
 
-    # Detection using MATLAB
     matlab, eng = _start_matlab_engine("DACS")
     try:
         f = matlab.double(response_mat.tolist())
@@ -325,11 +317,24 @@ def run_dacs(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]
     # Take the smaller cluster as the adversary group
     if groups.sum() > n_workers - groups.sum():
         groups = 1 - groups
-    worker_penalties = groups
+    return groups
 
-    # Aggregation
-    aggregator = subcad.WeightedDawidSkene()
-    labels = aggregator.fit_predict(response_mat, worker_penalties, None)
+
+def run_dacs(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+    """Detect adversaries with the MATLAB DACS implementation, then aggregate.
+
+    Starts a MATLAB engine and calls `research/mscripts/dacs/dacs.m` to get a
+    hard honest/adversary worker partition. Labels are fused with vanilla 
+    `subcad.DawidSkene` run on the workers DACS flags as honest.
+    """
+    try:
+        rhos = _resolve_array(cfg, "rho")
+    except ValueError:
+        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
+
+    worker_penalties = _detect_dacs_groups(response_mat, rhos)
+
+    labels = subcad.DawidSkene().fit_predict(response_mat[worker_penalties == 0, :])
 
     yield ModelResult(
         label=f"DACS",
@@ -370,15 +375,27 @@ def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]
 def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
     """Detect adversaries with the MATLAB RepAlg implementation, then aggregate.
 
-    Starts a MATLAB engine and calls `research/mscripts/repalg.m`, which returns 
-    a continuous per-worker score, representing workers' penalty. The penalties 
-    are used as `worker_penalties` in `subcad.WeightedDawidSkene` to find labels.
+    Starts a MATLAB engine and calls `research/mscripts/repalg.m`, which returns
+    a continuous per-worker score. `n_adv` workers with highest scores are deemed 
+    as adversarial, where `n_adv` is taken from the smaller cluster of a DACS 
+    partition. Labels are fused with vanilla `subcad.DawidSkene` run on the workers 
+    flagged as honest. 
     """
+    
     class_ids = np.unique(response_mat[response_mat > 0])
     if len(class_ids) != 2:
         raise ValueError(
             f"RepAlg only supports binary classification, got {len(class_ids)} classes."
         )
+
+    n_workers, _ = response_mat.shape
+    try:
+        rhos = _resolve_array(cfg, "rho")
+    except ValueError:
+        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
+
+    dacs_groups = _detect_dacs_groups(response_mat, rhos)
+    n_adv = int(dacs_groups.sum())
 
     matlab, eng = _start_matlab_engine("RepAlg")
     try:
@@ -388,15 +405,16 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
     finally:
         eng.quit()
 
-    worker_penalties = np.clip(scores, 0, 1)
+    adv_idx = np.argpartition(scores, -n_adv)[-n_adv:]
+    is_adversary = np.zeros(n_workers, dtype=bool)
+    is_adversary[adv_idx] = True
 
-    aggregator = subcad.WeightedDawidSkene()
-    labels = aggregator.fit_predict(response_mat, worker_penalties, None)
+    labels = subcad.DawidSkene().fit_predict(response_mat[~is_adversary, :])
 
     yield ModelResult(
         label="RepAlg",
-        params={},
-        worker_scores=worker_penalties,
+        params={"rhos": rhos.tolist()},
+        worker_scores=scores,
         labels_hat=labels,
     )
 
