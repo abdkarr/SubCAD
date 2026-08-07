@@ -377,17 +377,13 @@ def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]
 
 def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
     """Detect adversaries with `subcad.SoftPenaltyDetector`/`HardPenaltyDetector`,
-    then aggregate with `subcad.WeightedDawidSkene`.
+    then aggregate.
 
-    `cfg["detector"]` selects "soft" (default) or "hard". Soft-penalty
-    scores already fall in $[0, 1]$ (each is an average of `1/d_j^+`/
-    `1/d_j^-` terms, themselves `<= 1`) and are used as `worker_penalties`
-    as-is; hard-penalty scores are raw, unbounded semi-matching degrees
-    and are min-max normalized by their own max first. Unlike the
-    previous DACS + vanilla-`DawidSkene` implementation, this needs no
-    estimate of `n_adv` (and no MATLAB engine at all) -- every worker's
-    responses are downweighted continuously by `WeightedDawidSkene`
-    rather than hard-thresholded into an honest/adversary partition.
+    `cfg["detector"]` selects "soft" (default) or "hard". Neither RepAlg algorithm 
+    estimates how many workers are adversarial on its own, so `n_adv` is taken 
+    from the smaller cluster of a MATLAB DACS partition (`_detect_dacs_groups`). 
+    `n_adv` workers with the highest scores are deemed adversarial, and labels 
+    are fused with vanilla `subcad.DawidSkene` run on the workers flagged as honest.
     """
 
     class_ids = np.unique(response_mat[response_mat > 0])
@@ -395,6 +391,15 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
         raise ValueError(
             f"RepAlg only supports binary classification, got {len(class_ids)} classes."
         )
+
+    n_workers, _ = response_mat.shape
+    try:
+        rhos = _resolve_array(cfg, "rho")
+    except ValueError:
+        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
+
+    dacs_groups = _detect_dacs_groups(response_mat, rhos)
+    n_adv = int(dacs_groups.sum())
 
     detector_kind = cfg.get("detector", "soft")
     if detector_kind == "soft":
@@ -408,17 +413,15 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
 
     scores = detector.fit_predict(response_mat)
 
-    if detector_kind == "hard":
-        max_score = scores.max()
-        worker_penalties = scores / max_score if max_score > 0 else scores
-    else:
-        worker_penalties = scores
+    adv_idx = np.argpartition(scores, -n_adv)[-n_adv:]
+    is_adversary = np.zeros(n_workers, dtype=bool)
+    is_adversary[adv_idx] = True
 
-    labels = subcad.WeightedDawidSkene().fit_predict(response_mat, worker_penalties)
+    labels = subcad.DawidSkene().fit_predict(response_mat[~is_adversary, :])
 
     yield ModelResult(
         label=detector_label,
-        params={"detector": detector_kind},
+        params={"rhos": rhos.tolist(), "detector": detector_kind},
         worker_scores=scores,
         labels_hat=labels,
     )
