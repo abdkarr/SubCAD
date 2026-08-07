@@ -21,6 +21,7 @@ dependencies = [
 zensical = ">=0.0.48"
 mkdocstrings-python = ">=2.0"
 ipykernel = ">=7.3.0"
+pytest = ">=8.3"
 
 [project.optional-dependencies]
 experiments = [

@@ -250,6 +250,9 @@ def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
                             f"Unknown aggregator '{cfg['aggregator']}' in method cfg."
                         )
 
+                    if not cfg.get("penalize_tasks", True):
+                        task_penalties = None
+
                     labels = aggregator.fit_predict(
                         response_mat, worker_penalties, task_penalties
                     )
@@ -373,15 +376,16 @@ def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]
 
 
 def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Detect adversaries with the MATLAB RepAlg implementation, then aggregate.
+    """Detect adversaries with `subcad.SoftPenaltyDetector`/`HardPenaltyDetector`,
+    then aggregate.
 
-    Starts a MATLAB engine and calls `research/mscripts/repalg.m`, which returns
-    a continuous per-worker score. `n_adv` workers with highest scores are deemed 
-    as adversarial, where `n_adv` is taken from the smaller cluster of a DACS 
-    partition. Labels are fused with vanilla `subcad.DawidSkene` run on the workers 
-    flagged as honest. 
+    `cfg["detector"]` selects "soft" (default) or "hard". Neither RepAlg algorithm 
+    estimates how many workers are adversarial on its own, so `n_adv` is taken 
+    from the smaller cluster of a MATLAB DACS partition (`_detect_dacs_groups`). 
+    `n_adv` workers with the highest scores are deemed adversarial, and labels 
+    are fused with vanilla `subcad.DawidSkene` run on the workers flagged as honest.
     """
-    
+
     class_ids = np.unique(response_mat[response_mat > 0])
     if len(class_ids) != 2:
         raise ValueError(
@@ -397,13 +401,17 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
     dacs_groups = _detect_dacs_groups(response_mat, rhos)
     n_adv = int(dacs_groups.sum())
 
-    matlab, eng = _start_matlab_engine("RepAlg")
-    try:
-        f = matlab.double(response_mat.tolist())
-        scores = eng.repalg(f, nargout=1)
-        scores = np.array(scores, dtype=float).flatten()
-    finally:
-        eng.quit()
+    detector_kind = cfg.get("detector", "soft")
+    if detector_kind == "soft":
+        detector = subcad.SoftPenaltyDetector()
+        detector_label = "RepAlgSoft"
+    elif detector_kind == "hard":
+        detector = subcad.HardPenaltyDetector()
+        detector_label = "RepAlgHard"
+    else:
+        raise ValueError(f"Unknown detector '{detector_kind}' in method cfg.")
+
+    scores = detector.fit_predict(response_mat)
 
     adv_idx = np.argpartition(scores, -n_adv)[-n_adv:]
     is_adversary = np.zeros(n_workers, dtype=bool)
@@ -412,8 +420,8 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
     labels = subcad.DawidSkene().fit_predict(response_mat[~is_adversary, :])
 
     yield ModelResult(
-        label="RepAlg",
-        params={"rhos": rhos.tolist()},
+        label=detector_label,
+        params={"rhos": rhos.tolist(), "detector": detector_kind},
         worker_scores=scores,
         labels_hat=labels,
     )

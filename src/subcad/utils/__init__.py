@@ -1,6 +1,7 @@
 import numpy as np
 
-from .typing import RNGType
+from ..typing import RNGType
+from .semimatching import OptimalSemiMatching
 
 
 def check_rng(rng: RNGType) -> np.random.Generator:

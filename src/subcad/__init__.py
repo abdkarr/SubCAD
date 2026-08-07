@@ -1,4 +1,10 @@
-from .detection import GreedyDetector, GreedyPPDetector, SpectralDetector
+from .detection import (
+    GreedyDetector,
+    GreedyPPDetector,
+    HardPenaltyDetector,
+    SoftPenaltyDetector,
+    SpectralDetector,
+)
 from .selection import DensitySelector, SpectralSeededSelector
 from .aggregators import MajorityVoting, DawidSkene, WeightedMajorityVoting, WeightedDawidSkene
 from . import data
