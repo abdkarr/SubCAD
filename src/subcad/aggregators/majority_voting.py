@@ -22,7 +22,13 @@ class MajorityVoting:
     ----------
     labels_ : npt.NDArray
         $(N, )$ dimensional array where `labels_[i]` is the label of $i$th
-        task estimated by majority voting. Set after calling `fit`.
+        task estimated by majority voting, or `0` if no worker labeled
+        task $i$ (e.g. after upstream adversary elimination stripped it of
+        every labeler) -- the same sentinel `response_mat` itself uses for
+        "no label given", rather than leaving it to `scipy.stats.mode`'s
+        `nan` result for an empty slice to be silently (and, depending on
+        `response_mat`'s dtype, not always consistently) cast into
+        `labels_`'s dtype.
     """
 
     def fit(self, response_mat: npt.NDArray, y=None) -> "MajorityVoting":
@@ -42,8 +48,15 @@ class MajorityVoting:
         -------
         self
         """
-        masked_responses = np.ma.masked_array(response_mat, response_mat == 0)
-        self.labels_ = stats.mode(masked_responses, axis=0).mode
+        has_labels = np.any(response_mat != 0, axis=0)
+
+        labels = np.zeros(response_mat.shape[1], dtype=response_mat.dtype)
+        if np.any(has_labels):
+            labeled_mat = response_mat[:, has_labels]
+            masked_responses = np.ma.masked_array(labeled_mat, labeled_mat == 0)
+            labels[has_labels] = stats.mode(masked_responses, axis=0).mode
+
+        self.labels_ = labels
 
         return self
 

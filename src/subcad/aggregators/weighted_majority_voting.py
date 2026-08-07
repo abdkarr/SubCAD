@@ -31,8 +31,10 @@ class WeightedMajorityVoting:
     ----------
     labels_ : npt.NDArray
         $(N, )$ dimensional array where `labels_[i]` is the label of $i$th
-        task estimated by weighted majority voting. Set after calling
-        `fit`.
+        task estimated by weighted majority voting, or `0` if no worker
+        labeled task $i$ -- same "no label" sentinel `response_mat` itself
+        uses and the same convention `MajorityVoting` falls back to,
+        rather than silently defaulting to the smallest class id.
     """
 
     def fit(
@@ -77,6 +79,8 @@ class WeightedMajorityVoting:
         labels_hat = np.zeros(n_tasks)
         for t in range(n_tasks):
             t_workers = np.where(response_mat[:, t])[0]
+            if len(t_workers) == 0:
+                continue
 
             if task_penalties is None:
                 weights = 1 - worker_penalties[t_workers]

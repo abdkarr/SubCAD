@@ -156,7 +156,7 @@ def planted_attacks(config):
 
     datasets = ["rte", "sp", "web", "dog", "temp", "adult2"]
     baselines = ["glad", "ebcc", "la-onepass", "la-twopass", "mv", "ds"]
-    competitors = ["dacs", "repalg", "mmsr"]
+    competitors = ["dacs", "repalg-soft", "repalg-hard", "mmsr"]
     proposed = ["subcad-wgsmv", "subcad-wgsds"]
     methods = baselines + competitors + proposed
 
@@ -239,7 +239,7 @@ def planted_attacks_with_experts(config):
 
     datasets = ["rte", "sp", "web", "dog", "temp", "adult2"]
     baselines = ["glad", "ebcc", "la-onepass", "la-twopass", "mv", "ds"]
-    competitors = ["dacs", "repalg", "mmsr"]
+    competitors = ["dacs", "repalg-soft", "repalg-hard", "mmsr"]
     proposed = ["subcad-wgsmv", "subcad-wgsds"]
     methods = baselines + competitors + proposed
 
