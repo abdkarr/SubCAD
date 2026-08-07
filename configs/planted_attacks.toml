@@ -77,8 +77,13 @@ rho = 100
 [method.mmsr]
 name = "mmsr"
 
-[method.repalg]
+[method.repalg-soft]
 name = "repalg"
+detector = "soft"
+
+[method.repalg-hard]
+name = "repalg"
+detector = "hard"
 
 [method.glad]
 name = "glad"
