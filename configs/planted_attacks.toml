@@ -80,10 +80,12 @@ name = "mmsr"
 [method.repalg-soft]
 name = "repalg"
 detector = "soft"
+adv_frac = 0.2
 
 [method.repalg-hard]
 name = "repalg"
 detector = "hard"
+adv_frac = 0.2
 
 [method.glad]
 name = "glad"
