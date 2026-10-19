@@ -1,30 +1,21 @@
-"""Three-layer experiment infrastructure for subcad experiments.
+"""Experiment infrastructure shared by the experiment scripts.
 
-Layers
-------
-ModelResult   — result container produced by runners
-evaluate()    — computes metrics from a ModelResult + ground truth
-REGISTRY      — maps method names to runner callables
-
-Runner signature: (response_mat, cfg) -> Iterator[ModelResult]
-
-cfg is the [method.*] dict from the TOML. Runners resolve their own search
-arrays from it via _resolve_array; if a key is absent the module default is used.
-
-  iteration / iterations / iteration_logspace / iteration_linspace  → Greedy++ sweep
-  scale / scales / scale_logspace / scale_linspace                      → aggregator scale sweep
-  adv_frac / adv_fracs / adv_frac_logspace / adv_frac_linspace          → aggregator worker-cutoff sweep
-  target_frac / target_fracs / target_frac_logspace / target_frac_linspace → aggregator task-cutoff sweep
+ModelResult  - result of one method run, ready for evaluation
+evaluate()   - computes the metrics from a ModelResult and the ground truth
+run_*        - one function per method: (response_mat, **options) -> ModelResult
+METHODS      - the methods of the paper by name; each is a function
+               response_mat -> ModelResult (RepAlg also needs `adv_frac`, the
+               true fraction of adversaries)
 
 Usage in an experiment script
-------------------------------
-    rows = [evaluate(r, gt_adversaries, gt_targeted, gt_labels)
-            for r in REGISTRY[method](response_mat, method_cfg)]
+-----------------------------
+    result = METHODS[method](response_mat)
+    row = evaluate(result, gt_adversaries, gt_targeted, gt_labels)
 """
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import numpy.typing as npt
@@ -36,23 +27,6 @@ import subcad
 from subcad.thirdparty import ebcc_labels, la_one_pass_labels, la_two_pass_labels
 
 MSCRIPTS_DIR = Path(subcad.PROJECT_DIR, "research", "mscripts")
-
-
-def _resolve_array(cfg: dict, key: str) -> npt.NDArray:
-    if f"{key}_logspace" in cfg:
-        s, e, n = cfg[f"{key}_logspace"]
-        return np.logspace(s, e, int(n))
-    if f"{key}_linspace" in cfg:
-        s, e, n = cfg[f"{key}_linspace"]
-        return np.linspace(s, e, int(n))
-    if f"{key}s" in cfg:
-        return np.array(cfg[f"{key}s"])
-    if key in cfg:
-        return np.array([cfg[key]])
-    raise ValueError(
-        f"No search config found for '{key}' in method cfg. "
-        f"Add '{key}', '{key}s', '{key}_logspace', or '{key}_linspace'."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,98 +153,88 @@ def evaluate(
 # ---------------------------------------------------------------------------
 
 
-def run_subcad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+def run_subcad(
+    response_mat: npt.NDArray,
+    kind: str,
+    detector: str,
+    selector: str,
+    aggregator: str,
+    iterations: int | None = None,
+    adv_frac: float | None = None,
+    target_frac: float | None = None,
+    scale: float = 5.0,
+) -> ModelResult:
+    """SubCAD: detect (rank), estimate the sizes, aggregate with weights.
+
+    `kind` is the graph ("weighted" or "binary"), `detector` is "greedy",
+    "greedypp" (with `iterations`) or "spectral", `selector` is "density" or
+    "spectral" and `aggregator` is "mv" or "ds". `adv_frac` / `target_frac`
+    (the kappas of the weights) are the fractions estimated by the selector
+    unless given.
+    """
     n_workers, n_tasks = response_mat.shape
-    kind = cfg["kind"]
 
-    if cfg["detector"] == "greedypp":
-        iterations_values = _resolve_array(cfg, "iteration")
+    if detector == "greedy":
+        det = subcad.GreedyDetector(kind=kind)
+        detector_label = "Greedy"
+        detector_params = {}
+    elif detector == "greedypp":
+        det = subcad.GreedyPPDetector(kind=kind, iterations=int(iterations))
+        detector_label = "GreedyPP"
+        detector_params = {"iterations": int(iterations)}
+    elif detector == "spectral":
+        det = subcad.SpectralDetector(kind=kind)
+        detector_label = "Spectral"
+        detector_params = {}
     else:
-        iterations_values = [None]
+        raise ValueError(f"Unknown detector '{detector}'.")
 
-    for iterations in iterations_values:
-        if cfg["detector"] == "greedy":
-            detector = subcad.GreedyDetector(kind=kind)
-            detector_label = "Greedy"
-            detector_params = {}
-        elif cfg["detector"] == "greedypp":
-            detector = subcad.GreedyPPDetector(kind=kind, iterations=int(iterations))
-            detector_label = "GreedyPP"
-            detector_params = {"iterations": int(iterations)}
-        elif cfg["detector"] == "spectral":
-            detector = subcad.SpectralDetector(kind=kind)
-            detector_label = "Spectral"
-            detector_params = {}
-        else:
-            raise ValueError(f"Unknown detector '{cfg['detector']}' in method cfg.")
+    worker_scores, task_scores = det.fit_predict(response_mat)
 
-        worker_scores, task_scores = detector.fit_predict(response_mat)
+    if selector == "density":
+        sel = subcad.DensitySelector()
+        selector_label = "Density"
+    elif selector == "spectral":
+        sel = subcad.SpectralSeededSelector()
+        selector_label = "SpectralSeeded"
+    else:
+        raise ValueError(f"Unknown selector '{selector}'.")
 
-        if cfg["selector"] == "density":
-            selector = subcad.DensitySelector()
-            selector_label = "Density"
-        elif cfg["selector"] == "spectral":
-            selector = subcad.SpectralSeededSelector()
-            selector_label = "SpectralSeeded"
-        else:
-            raise ValueError(f"Unknown selector '{cfg['selector']}' in method cfg.")
+    n_adversaries, n_targeted = sel.select(det.biadj_mat_, worker_scores, task_scores)
 
-        n_adversaries, n_targeted = selector.select(
-            detector.biadj_mat_, worker_scores, task_scores
-        )
+    if adv_frac is None:
+        adv_frac = n_adversaries / n_workers
+    if target_frac is None:
+        target_frac = n_targeted / n_tasks
+    worker_penalties, task_penalties = det.aggregation_penalties(
+        float(adv_frac), float(target_frac), float(scale)
+    )
 
-        try:
-            adv_fracs = _resolve_array(cfg, "adv_frac")
-        except ValueError:
-            adv_fracs = np.array([n_adversaries / n_workers])
-        try:
-            target_fracs = _resolve_array(cfg, "target_frac")
-        except ValueError:
-            target_fracs = np.array([n_targeted / n_tasks])
-        try:
-            scales = _resolve_array(cfg, "scale")
-        except ValueError:
-            scales = np.array([5.0])
+    if aggregator == "mv":
+        agg = subcad.WeightedMajorityVoting()
+        aggregator_label = "MV"
+    elif aggregator == "ds":
+        agg = subcad.WeightedDawidSkene()
+        aggregator_label = "DS"
+    else:
+        raise ValueError(f"Unknown aggregator '{aggregator}'.")
 
-        for adv_frac in adv_fracs:
-            for target_frac in target_fracs:
-                for scale in scales:
-                    worker_penalties, task_penalties = detector.aggregation_penalties(
-                        float(adv_frac), float(target_frac), float(scale)
-                    )
+    labels = agg.fit_predict(response_mat, worker_penalties, task_penalties)
 
-                    if cfg["aggregator"] == "mv":
-                        aggregator = subcad.WeightedMajorityVoting()
-                        aggregator_label = "MV"
-                    elif cfg["aggregator"] == "ds":
-                        aggregator = subcad.WeightedDawidSkene()
-                        aggregator_label = "DS"
-                    else:
-                        raise ValueError(
-                            f"Unknown aggregator '{cfg['aggregator']}' in method cfg."
-                        )
-
-                    if not cfg.get("penalize_tasks", True):
-                        task_penalties = None
-
-                    labels = aggregator.fit_predict(
-                        response_mat, worker_penalties, task_penalties
-                    )
-
-                    yield ModelResult(
-                        label=f"SubCAD{detector_label}{selector_label}{aggregator_label}",
-                        params={
-                            **detector_params,
-                            "adv_frac": float(adv_frac),
-                            "target_frac": float(target_frac),
-                            "scale": float(scale),
-                        },
-                        worker_scores=worker_scores,
-                        task_scores=task_scores,
-                        n_adversaries_hat=n_adversaries,
-                        n_targets_hat=n_targeted,
-                        labels_hat=labels,
-                    )
+    return ModelResult(
+        label=f"SubCAD{detector_label}{selector_label}{aggregator_label}",
+        params={
+            **detector_params,
+            "adv_frac": float(adv_frac),
+            "target_frac": float(target_frac),
+            "scale": float(scale),
+        },
+        worker_scores=worker_scores,
+        task_scores=task_scores,
+        n_adversaries_hat=n_adversaries,
+        n_targets_hat=n_targeted,
+        labels_hat=labels,
+    )
 
 
 def _start_matlab_engine(method: str):
@@ -323,31 +287,30 @@ def _detect_dacs_groups(response_mat: npt.NDArray, rhos: npt.NDArray) -> npt.NDA
     return groups
 
 
-def run_dacs(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+def run_dacs(
+    response_mat: npt.NDArray,
+    rhos=(1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000),
+) -> ModelResult:
     """Detect adversaries with the MATLAB DACS implementation, then aggregate.
 
     Starts a MATLAB engine and calls `research/mscripts/dacs/dacs.m` to get a
-    hard honest/adversary worker partition. Labels are fused with vanilla 
+    hard honest/adversary worker partition. Labels are fused with vanilla
     `subcad.DawidSkene` run on the workers DACS flags as honest.
     """
-    try:
-        rhos = _resolve_array(cfg, "rho")
-    except ValueError:
-        rhos = np.array([1.1, 2, 5, 10, 20, 50, 80, 100, 500, 800, 1000])
-
+    rhos = np.asarray(rhos)
     worker_penalties = _detect_dacs_groups(response_mat, rhos)
 
     labels = subcad.DawidSkene().fit_predict(response_mat[worker_penalties == 0, :])
 
-    yield ModelResult(
-        label=f"DACS",
+    return ModelResult(
+        label="DACS",
         params={"rhos": rhos.tolist()},
         worker_scores=worker_penalties,
         labels_hat=labels,
     )
 
 
-def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
+def run_mmsr(response_mat: npt.NDArray) -> ModelResult:
     """Detect adversaries with the MATLAB MMSR implementation, then aggregate.
 
     Starts a MATLAB engine and calls `research/mscripts/mmsr/mmsr.m` to get a
@@ -367,28 +330,17 @@ def run_mmsr(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]
 
     worker_scores = np.clip(1 - prob_worker, 0, 1)
 
-    yield ModelResult(
-        label="MMSR",
-        params={},
-        worker_scores=worker_scores,
-        labels_hat=labels,
-    )
+    return ModelResult(label="MMSR", params={}, worker_scores=worker_scores, labels_hat=labels)
 
 
-def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Detect adversaries with `subcad.SoftPenaltyDetector`/`HardPenaltyDetector`,
-    then aggregate.
+def run_repalg(response_mat: npt.NDArray, detector: str, adv_frac: float) -> ModelResult:
+    """Detect adversaries with RepAlg ("soft" or "hard" penalty), then aggregate.
 
-    `cfg["detector"]` selects "soft" (default) or "hard". Neither RepAlg
-    algorithm estimates how many workers are adversarial on its own, so
-    `n_adv` is instead swept from `cfg["adv_frac"]` (a hyperparameter, same
-    convention as `run_subcad`'s `adv_frac`/`adv_fracs`/`adv_frac_logspace`/
-    `adv_frac_linspace`, resolved via `_resolve_array`): for each
-    `adv_frac`, the top `round(adv_frac * n_workers)` highest-scoring
-    workers are eliminated, and labels are fused with vanilla
-    `subcad.DawidSkene` run on the remaining workers.
+    Neither RepAlg algorithm estimates how many workers are adversarial, so
+    the `round(adv_frac * n_workers)` highest-scoring workers are eliminated
+    (`adv_frac` is the true fraction in the experiments, i.e. an oracle) and
+    labels are fused with vanilla `subcad.DawidSkene` on the remaining workers.
     """
-
     class_ids = np.unique(response_mat[response_mat > 0])
     if len(class_ids) != 2:
         raise ValueError(
@@ -397,35 +349,31 @@ def run_repalg(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResul
 
     n_workers, _ = response_mat.shape
 
-    detector_kind = cfg.get("detector", "soft")
-    if detector_kind == "soft":
-        detector = subcad.SoftPenaltyDetector()
+    if detector == "soft":
+        det = subcad.SoftPenaltyDetector()
         detector_label = "RepAlgSoft"
-    elif detector_kind == "hard":
-        detector = subcad.HardPenaltyDetector()
+    elif detector == "hard":
+        det = subcad.HardPenaltyDetector()
         detector_label = "RepAlgHard"
     else:
-        raise ValueError(f"Unknown detector '{detector_kind}' in method cfg.")
+        raise ValueError(f"Unknown detector '{detector}'.")
 
-    scores = detector.fit_predict(response_mat)
+    scores = det.fit_predict(response_mat)
 
-    adv_fracs = _resolve_array(cfg, "adv_frac")
-    for adv_frac in adv_fracs:
-        n_adv = int(round(float(adv_frac) * n_workers))
+    n_adv = int(round(float(adv_frac) * n_workers))
+    is_adversary = np.zeros(n_workers, dtype=bool)
+    if n_adv > 0:
+        adv_idx = np.argpartition(scores, -n_adv)[-n_adv:]
+        is_adversary[adv_idx] = True
 
-        is_adversary = np.zeros(n_workers, dtype=bool)
-        if n_adv > 0:
-            adv_idx = np.argpartition(scores, -n_adv)[-n_adv:]
-            is_adversary[adv_idx] = True
+    labels = subcad.DawidSkene().fit_predict(response_mat[~is_adversary, :])
 
-        labels = subcad.DawidSkene().fit_predict(response_mat[~is_adversary, :])
-
-        yield ModelResult(
-            label=detector_label,
-            params={"detector": detector_kind, "adv_frac": float(adv_frac)},
-            worker_scores=scores,
-            labels_hat=labels,
-        )
+    return ModelResult(
+        label=detector_label,
+        params={"detector": detector, "adv_frac": float(adv_frac)},
+        worker_scores=scores,
+        labels_hat=labels,
+    )
 
 
 def _response_mat_to_crowdkit_df(response_mat: npt.NDArray) -> pd.DataFrame:
@@ -439,92 +387,67 @@ def _response_mat_to_crowdkit_df(response_mat: npt.NDArray) -> pd.DataFrame:
     )
 
 
-def run_glad(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with GLAD (`crowdkit.aggregation.GLAD`).
-
-    No adversary detection step; only produces `labels_hat`.
-    """
+def run_glad(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with GLAD (`crowdkit.aggregation.GLAD`)."""
     n_tasks = response_mat.shape[1]
     df = _response_mat_to_crowdkit_df(response_mat)
     labels = GLAD().fit_predict(df).reindex(range(n_tasks)).to_numpy()
 
-    yield ModelResult(label="GLAD", params={}, labels_hat=labels)
+    return ModelResult(label="GLAD", params={}, labels_hat=labels)
 
 
-def run_ebcc(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with EBCC (`subcad.thirdparty.ebcc_labels`).
-
-    No adversary detection step; only produces `labels_hat`.
-    """
-    labels = ebcc_labels(response_mat)
-
-    yield ModelResult(
-        label="EBCC", params={}, labels_hat=labels
-    )
+def run_ebcc(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with EBCC (`subcad.thirdparty.ebcc_labels`)."""
+    return ModelResult(label="EBCC", params={}, labels_hat=ebcc_labels(response_mat))
 
 
-def run_la_one_pass(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with the LA one-pass baseline.
-
-    No adversary detection step; only produces `labels_hat`.
-    """
-    labels = la_one_pass_labels(response_mat)
-
-    yield ModelResult(label="LAOnePass", params={}, labels_hat=labels)
+def run_la_one_pass(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with the LA one-pass baseline."""
+    return ModelResult(label="LAOnePass", params={}, labels_hat=la_one_pass_labels(response_mat))
 
 
-def run_la_two_pass(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with the LA two-pass baseline.
-
-    No adversary detection step; only produces `labels_hat`.
-    """
-    labels = la_two_pass_labels(response_mat)
-
-    yield ModelResult(label="LATwoPass", params={}, labels_hat=labels)
+def run_la_two_pass(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with the LA two-pass baseline."""
+    return ModelResult(label="LATwoPass", params={}, labels_hat=la_two_pass_labels(response_mat))
 
 
-def run_mv(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with vanilla Majority Voting (`subcad.MajorityVoting`).
-
-    No adversary detection step; only produces `labels_hat`.
-    """
-    labels = subcad.MajorityVoting().fit_predict(response_mat)
-
-    yield ModelResult(label="MV", params={}, labels_hat=labels)
+def run_mv(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with vanilla Majority Voting (`subcad.MajorityVoting`)."""
+    return ModelResult(label="MV", params={}, labels_hat=subcad.MajorityVoting().fit_predict(response_mat))
 
 
-def run_ds(response_mat: npt.NDArray, cfg: dict = {}) -> Iterator[ModelResult]:
-    """Aggregate task labels with vanilla Dawid-Skene (`subcad.DawidSkene`).
-
-    No adversary detection step; only produces `labels_hat`.
-    """
-    labels = subcad.DawidSkene().fit_predict(response_mat)
-
-    yield ModelResult(label="DS", params={}, labels_hat=labels)
+def run_ds(response_mat: npt.NDArray) -> ModelResult:
+    """Aggregate task labels with vanilla Dawid-Skene (`subcad.DawidSkene`)."""
+    return ModelResult(label="DS", params={}, labels_hat=subcad.DawidSkene().fit_predict(response_mat))
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# Methods
 # ---------------------------------------------------------------------------
 
-REGISTRY: dict[str, callable] = {
-    "subcad": run_subcad,
-    "dacs": run_dacs,
-    "mmsr": run_mmsr,
-    "repalg": run_repalg,
+# Each method is a function `response_mat -> ModelResult`. RepAlg cannot
+# estimate the number of adversaries and also needs `adv_frac=` (the true
+# fraction of adversaries, an oracle); SubCAD estimates it with the selector.
+# Method names: subcad-<w|b>(eighted/binary graph)<g>(reedy peeling)
+# <d|s>(ensity/spectral size selector)<mv|ds>(aggregator).
+METHODS = {
+    # adversary-agnostic baselines
+    "mv": run_mv,
+    "ds": run_ds,
     "glad": run_glad,
     "ebcc": run_ebcc,
     "la-onepass": run_la_one_pass,
     "la-twopass": run_la_two_pass,
-    "mv": run_mv,
-    "ds": run_ds,
-}
-
-LOADER = {
-    "rte": lambda x: subcad.data.fetch_rte(x, return_X_y=True),
-    "sp": lambda x: subcad.data.fetch_sp(x, return_X_y=True),
-    "dog": lambda x: subcad.data.fetch_dog(x, return_X_y=True),
-    "web": lambda x: subcad.data.fetch_web(x, return_X_y=True),
-    "adult2": lambda x: subcad.data.fetch_adult2(x, return_X_y=True),
-    "temp": lambda x: subcad.data.fetch_temp(x, return_X_y=True),
+    # adversarial crowdsourcing methods
+    "dacs": partial(run_dacs, rhos=[100]),
+    "mmsr": run_mmsr,
+    "repalg-soft": partial(run_repalg, detector="soft"),
+    "repalg-hard": partial(run_repalg, detector="hard"),
+    # SubCAD
+    "subcad-wgdmv": partial(run_subcad, kind="weighted", detector="greedy", selector="density", aggregator="mv"),
+    "subcad-wgdds": partial(run_subcad, kind="weighted", detector="greedy", selector="density", aggregator="ds"),
+    "subcad-wgsmv": partial(run_subcad, kind="weighted", detector="greedy", selector="spectral", aggregator="mv"),
+    "subcad-wgsds": partial(run_subcad, kind="weighted", detector="greedy", selector="spectral", aggregator="ds"),
+    "subcad-bgsmv": partial(run_subcad, kind="binary", detector="greedy", selector="spectral", aggregator="mv"),
+    "subcad-bgsds": partial(run_subcad, kind="binary", detector="greedy", selector="spectral", aggregator="ds"),
 }

@@ -34,10 +34,8 @@ def fetch_web(
     commit so the downloaded content can't change underneath this function.
 
     Not every task has a gold label in `web_truth.txt` (12 of the 2665 tasks are
-    missing one) — unlike `fetch_rte`/`fetch_temp`, those tasks are kept (with
-    `target == 0`, the same "no ground truth" sentinel used for missing worker
-    responses) rather than dropped, matching the original `web.mat` shipped
-    alongside this package.
+    missing one). Those tasks are removed, the same way `load_dataset` removes the
+    tasks without ground truth from the `.mat` files, which leaves 2653 tasks.
 
     ??? Example
         The following code uses `data` folder under current working directory
@@ -73,7 +71,7 @@ def fetch_web(
           provided by ith worker for jth task. `data[i, j] = 0` if no label is
           provided by the ith worker for jth task.
         - `target` : $(N, )$ dimensional vector where `target[i]` is the
-          ground truth label of ith task, or `0` if no gold label exists for it.
+          ground truth label of ith task.
 
         If `return_X_y` is True, the `(data, target)` tuple is returned directly.
 
@@ -130,12 +128,16 @@ def fetch_web(
     response_mat[rows, cols] = vals
 
     # Convert ground truth labels to class indices. Tasks missing from
-    # web_truth.txt are left at the default 0 ("no ground truth") rather than
-    # dropped, since web_truth.txt doesn't cover every task in web_crowd.txt.
+    # web_truth.txt are left at 0 here and removed below.
     gt_labels = np.zeros(n_tasks, dtype=np.int64)
     for _, row in gt_df.iterrows():
         if row["task_id"] in task_to_idx:
             gt_labels[task_to_idx[row["task_id"]]] = class_to_idx[row["gt"]]
+
+    # Remove tasks with no ground truth information
+    has_gt = gt_labels != 0
+    response_mat = response_mat[:, has_gt]
+    gt_labels = gt_labels[has_gt]
 
     response_mat = _preprocess(response_mat)
 
