@@ -1,5 +1,7 @@
 """Experiment infrastructure shared by the experiment scripts.
 
+LOADER       - the real datasets by name; each is a function
+               input_dir -> (response_mat, gt_labels)
 ModelResult  - result of one method run, ready for evaluation
 evaluate()   - computes the metrics from a ModelResult and the ground truth
 run_*        - one function per method: (response_mat, **options) -> ModelResult
@@ -27,6 +29,16 @@ import subcad
 from subcad.thirdparty import ebcc_labels, la_one_pass_labels, la_two_pass_labels
 
 MSCRIPTS_DIR = Path(subcad.PROJECT_DIR, "research", "mscripts")
+
+# The real datasets by name; each is a function input_dir -> (response_mat, gt_labels)
+LOADER = {
+    "rte": lambda x: subcad.data.fetch_rte(x, return_X_y=True),
+    "sp": lambda x: subcad.data.fetch_sp(x, return_X_y=True),
+    "dog": lambda x: subcad.data.fetch_dog(x, return_X_y=True),
+    "web": lambda x: subcad.data.fetch_web(x, return_X_y=True),
+    "adult2": lambda x: subcad.data.fetch_adult2(x, return_X_y=True),
+    "temp": lambda x: subcad.data.fetch_temp(x, return_X_y=True),
+}
 
 
 # ---------------------------------------------------------------------------

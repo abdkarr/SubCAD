@@ -2,9 +2,11 @@
 Experiment testing detection/selection/aggregation methods on a real
 crowdsourcing dataset corrupted with synthetic adversaries, with an
 additional pool of synthetic "expert" honest annotators mixed in.
-"""
 
-import tomllib
+`run` runs one (dataset, method, seed) and writes (overwriting) its metrics to
+`research/data/outputs/planted_attacks_with_experts/<dataset>/<setting>/<method>/seed-<seed>.csv`.
+`aggregate` summarizes the results of all seeds.
+"""
 
 from pathlib import Path
 
@@ -13,66 +15,52 @@ import numpy as np
 import pandas as pd
 
 import subcad
-import dispatcher
+from dispatcher import LOADER, METHODS, evaluate
+from reporting import write_reports
 
 EXP_NAME = "planted_attacks_with_experts"
 INPUT_DIR = Path(subcad.PROJECT_DIR, "research", "data", "inputs")
 OUTPUT_DIR = Path(subcad.PROJECT_DIR, "research", "data", "outputs", EXP_NAME)
+REPORTS_DIR = Path(subcad.PROJECT_DIR, "research", "reports", EXP_NAME)
+
+# Settings of TSP paper
+ADV_FRAC = 0.2  # fraction of the workers that are adversaries
+TARGET_FRAC = 0.2  # fraction of the tasks that are targeted
+CAMO_RELIABILITY = 2
+EXPERT_FRAC = 0.2  # fraction of the workers that are experts
+EXPERT_RELIABILITY = 4
+# probability that an adversary labels a targeted task (rho_a)
+TARGET_OBS = {"rte": 0.3, "sp": 0.3, "web": 0.3, "dog": 0.6, "adult2": 0.6, "temp": 0.6}
 
 
-def _load_config(
-    config: str, dataset: str | None, method: str | None
-) -> tuple[dict, dict, dict]:
-    cfg_path = Path(config)
-    if not cfg_path.is_absolute():
-        cfg_path = Path(subcad.PROJECT_DIR) / cfg_path
-    cfg = tomllib.loads(cfg_path.read_text())
-
-    dataset_cfg = cfg.get("dataset", {}).get(dataset)
-    if dataset_cfg is None:
-        raise click.BadParameter(
-            f"[dataset.{dataset}] not found in {config}", param_hint="--dataset"
-        )
-
-    method_cfg = cfg.get("method", {}).get(method)
-    if method_cfg is None:
-        raise click.BadParameter(
-            f"[method.{method}] not found in {config}", param_hint="--method"
-        )
-
-    return dataset_cfg, method_cfg
+def setting(dataset):
+    """Name of the output folder of the settings used for `dataset`."""
+    return (
+        f"af={ADV_FRAC}_tf={TARGET_FRAC}_to={TARGET_OBS[dataset]}_cr={CAMO_RELIABILITY}"
+        f"_ef={EXPERT_FRAC}_er={EXPERT_RELIABILITY}"
+    )
 
 
-@click.command()
-@click.option("--config", default="configs/planted_attacks_with_experts.toml")
-@click.option(
-    "--dataset", default="rte", help="Key into [dataset.*] section of the config TOML."
-)
-@click.option(
-    "--method",
-    default="subcad-wgdmv",
-    help="Key into [method.*] section of the config TOML.",
-)
-@click.option("--seed", default=1)
-def cli(config, dataset, method, seed):
-    data_cfg, method_cfg = _load_config(config, dataset, method)
+@click.group()
+def cli():
+    pass
 
-    # Data generation parameters
-    dataset_name = data_cfg["name"]
-    adv_frac = data_cfg["adv_frac"]
-    target_frac = data_cfg["target_frac"]
-    target_obs = data_cfg["target_obs"]
-    camo_reliability = data_cfg["camo_reliability"]
-    expert_frac = data_cfg["expert_frac"]
-    expert_reliability = data_cfg["expert_reliability"]
+
+@cli.command()
+@click.option("--dataset", type=click.Choice(list(TARGET_OBS)), required=True)
+@click.option("--method", type=click.Choice(list(METHODS)), required=True)
+@click.option("--seed", default=1, show_default=True)
+def run(dataset, method, seed):
+    """Run one method on one corrupted copy of a dataset."""
+    target_obs = TARGET_OBS[dataset]
 
     # Load real data as the honest workers
-    honest_responses, gt_labels = dispatcher.LOADER[dataset_name](INPUT_DIR)
+    honest_responses, gt_labels = LOADER[dataset](INPUT_DIR)
 
     n_honests, n_tasks = honest_responses.shape
     honest_obs = np.mean(np.count_nonzero(honest_responses, axis=1) / n_tasks)
-    n_adversaries = int(adv_frac * n_honests / (1 - adv_frac - expert_frac))
-    n_experts = int(expert_frac * n_honests / (1 - adv_frac - expert_frac))
+    n_adversaries = int(ADV_FRAC * n_honests / (1 - ADV_FRAC - EXPERT_FRAC))
+    n_experts = int(EXPERT_FRAC * n_honests / (1 - ADV_FRAC - EXPERT_FRAC))
 
     rng = np.random.default_rng(seed)
 
@@ -80,10 +68,10 @@ def cli(config, dataset, method, seed):
     adv_responses, gt_targeted = subcad.data.make_adversaries(
         gt_labels,
         n_adversaries,
-        target_frac=target_frac,
+        target_frac=TARGET_FRAC,
         camo_obs=honest_obs,
         target_obs=target_obs,
-        camo_reliability=camo_reliability,
+        camo_reliability=CAMO_RELIABILITY,
         random_state=rng,
     )
 
@@ -95,7 +83,7 @@ def cli(config, dataset, method, seed):
         target_frac=0.0,
         camo_obs=honest_obs,
         target_obs=0.0,
-        camo_reliability=expert_reliability,
+        camo_reliability=EXPERT_RELIABILITY,
         random_state=rng,
     )
 
@@ -110,25 +98,21 @@ def cli(config, dataset, method, seed):
     response_mat = response_mat[idx, :]
     gt_adversaries = gt_adversaries[idx]
 
-    # Detection / Selection / Aggregation with Evaluation
-    method_name = method_cfg["name"]
-    perfs = []
-    for result in dispatcher.REGISTRY[method_name](response_mat, method_cfg):
-        perfs.append(
-            dispatcher.evaluate(result, gt_adversaries, gt_targeted, gt_labels)
-        )
+    # RepAlg is given the true fraction of adversaries (oracle)
+    options = {"adv_frac": ADV_FRAC} if method.startswith("repalg") else {}
+    result = METHODS[method](response_mat, **options)
+    row = evaluate(result, gt_adversaries, gt_targeted, gt_labels)
 
-    # Save the performance
-    save_dir = (
-        f"{dataset_name}/"
-        f"af={adv_frac}_tf={target_frac}_to={target_obs}_cr={camo_reliability}_"
-        f"ef={expert_frac}_er={expert_reliability}/"
-        f"{method}"
-    )
-    save_file = f"seed-{seed:d}.csv"
-    out_path = Path(OUTPUT_DIR, save_dir, save_file)
+    out_path = OUTPUT_DIR / dataset / setting(dataset) / method / f"seed-{seed}.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(perfs).to_csv(out_path, index=False, float_format="%.4f")
+    pd.DataFrame([row]).to_csv(out_path, index=False, float_format="%.4f")
+
+
+@cli.command()
+@click.option("--out-dir", type=click.Path(path_type=Path), default=REPORTS_DIR, show_default=True)
+def aggregate(out_dir):
+    """Summarize the results of all seeds: mean and 95% CI, significance tests."""
+    write_reports(OUTPUT_DIR, setting, out_dir)
 
 
 if __name__ == "__main__":
