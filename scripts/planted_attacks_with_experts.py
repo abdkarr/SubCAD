@@ -3,6 +3,10 @@ Experiment testing detection/selection/aggregation methods on a real
 crowdsourcing dataset corrupted with synthetic adversaries, with an
 additional pool of synthetic "expert" honest annotators mixed in.
 
+The adversaries are planted exactly as in `planted_attacks.py` (same number, and for a
+given seed the same responses), and `EXPERT_RATIO * n_adversaries` experts are added, so
+that the two experiments differ only by the experts.
+
 `run` runs one (dataset, method, seed) and writes (overwriting) its metrics to
 `research/data/outputs/planted_attacks_with_experts/<dataset>/<setting>/<method>/seed-<seed>.csv`.
 `aggregate` summarizes the results of all seeds.
@@ -24,10 +28,10 @@ OUTPUT_DIR = Path(subcad.PROJECT_DIR, "research", "data", "outputs", EXP_NAME)
 REPORTS_DIR = Path(subcad.PROJECT_DIR, "research", "reports", EXP_NAME)
 
 # Settings of TSP paper
-ADV_FRAC = 0.2  # fraction of the workers that are adversaries
+ADV_FRAC = 0.2  # fraction of the honest workers and adversaries that are adversaries
 TARGET_FRAC = 0.2  # fraction of the tasks that are targeted
 CAMO_RELIABILITY = 2
-EXPERT_FRAC = 0.2  # fraction of the workers that are experts
+EXPERT_RATIO = 1.0  # number of experts per adversary
 EXPERT_RELIABILITY = 4
 # probability that an adversary labels a targeted task (rho_a)
 TARGET_OBS = {"rte": 0.3, "sp": 0.3, "web": 0.3, "dog": 0.6, "adult2": 0.6, "temp": 0.6}
@@ -37,7 +41,7 @@ def setting(dataset):
     """Name of the output folder of the settings used for `dataset`."""
     return (
         f"af={ADV_FRAC}_tf={TARGET_FRAC}_to={TARGET_OBS[dataset]}_cr={CAMO_RELIABILITY}"
-        f"_ef={EXPERT_FRAC}_er={EXPERT_RELIABILITY}"
+        f"_xr={EXPERT_RATIO}_er={EXPERT_RELIABILITY}"
     )
 
 
@@ -59,8 +63,8 @@ def run(dataset, method, seed):
 
     n_honests, n_tasks = honest_responses.shape
     honest_obs = np.mean(np.count_nonzero(honest_responses, axis=1) / n_tasks)
-    n_adversaries = int(ADV_FRAC * n_honests / (1 - ADV_FRAC - EXPERT_FRAC))
-    n_experts = int(EXPERT_FRAC * n_honests / (1 - ADV_FRAC - EXPERT_FRAC))
+    n_adversaries = int(ADV_FRAC * n_honests / (1 - ADV_FRAC))
+    n_experts = int(EXPERT_RATIO * n_adversaries)
 
     rng = np.random.default_rng(seed)
 
@@ -99,7 +103,9 @@ def run(dataset, method, seed):
     gt_adversaries = gt_adversaries[idx]
 
     # RepAlg is given the true fraction of adversaries (oracle)
-    options = {"adv_frac": ADV_FRAC} if method.startswith("repalg") else {}
+    options = (
+        {"adv_frac": n_adversaries / response_mat.shape[0]} if method.startswith("repalg") else {}
+    )
     result = METHODS[method](response_mat, **options)
     row = evaluate(result, gt_adversaries, gt_targeted, gt_labels)
 
